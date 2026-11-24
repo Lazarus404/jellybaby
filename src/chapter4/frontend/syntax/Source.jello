@@ -1,0 +1,66 @@
+package frontend.syntax;
+
+/** @file The file being compiled, line and column numbers in it, and diagnostics that quote it. */
+
+import { intText, join } from support.Text;
+
+let _path = "";
+let _text = "";
+
+// Makes `text`, read from `path`, the file that positions and diagnostics refer to.
+export let useSource = fn(path: Bytes, text: Bytes): Void {
+  _path = path;
+  _text = text;
+};
+
+// Checks whether byte `c` starts a character, rather than continuing a UTF-8 one.
+let _startsChar = fn(c: I32): Bool { (c < 128) || (c >= 192) };
+
+// Returns where the line holding byte `offset` starts.
+let _lineStart = fn(offset: I32): I32 {
+  let i = offset;
+  while ((i > 0) && (_text.get(i - 1) != "\n".code)) { i--; }
+  i
+};
+
+// Returns the 1-based line of byte `offset`.
+let _lineOf = fn(offset: I32): I32 {
+  let line = 1;
+  let i = 0;
+
+  while (i < offset) {
+    if (_text.get(i) == "\n".code) { line++; }
+    i++;
+  }
+  line
+};
+
+/* Returns the diagnostic for error `code` at byte `offset`, ready to throw:
+ * `path:line:column: message [code]`, then the line that holds the byte, then a caret under it.
+ * The column counts characters, so a tab counts as one, and the caret's line copies each tab
+ * before it so that it lines up in a terminal. */
+export let errorAt = fn(offset: I32, code: Bytes, message: Bytes): Bytes {
+  let start = _lineStart(offset);
+  let end = offset;
+  while ((end < _text.len()) && (_text.get(end) != "\n".code)) { end++; }
+
+  let caret: Array<Bytes> = [];
+  let column = 1;
+  let i = start;
+
+  while (i < offset) {
+    let c = _text.get(i);
+
+    if (c == "\t".code) {
+      caret.push("\t");
+      column++;
+    } else if (_startsChar(c)) {
+      caret.push(" ");
+      column++;
+    }
+    i++;
+  }
+  caret.push("^");
+  let place = _path + ":" + intText(_lineOf(offset)) + ":" + intText(column) + ": ";
+  place + message + " [" + code + "]\n" + _text.slice(start, end - start) + "\n" + join(caret)
+};

@@ -1,0 +1,114 @@
+import { run } from std.io.Command;
+import { writeText, makeDirs } from std.io.File;
+import { filesUnder } from std.io.Path;
+import { endsWith, indexOf, split } from std.core.Bytes;
+
+let dir = List.len(System.args) > 0 ? List.head(System.args) : ".";
+let failed = false;
+
+let say = fn(line: Bytes): Void { writeText("/dev/stdout", line + "\n"); };
+
+let fail = fn(line: Bytes): Void {
+  say("FAIL " + line);
+  failed = true;
+};
+
+let firstLine = fn(text: Bytes): Bytes {
+  let end = text.indexOf("\n");
+  end < 0 ? text : text.slice(0, end)
+};
+
+// The first line where `ours` and `theirs` differ, from each.
+let firstDifference = fn(ours: Bytes, theirs: Bytes): Bytes {
+  let a = ours.split("\n");
+  let b = theirs.split("\n");
+  let i = 0;
+  while (i < a.len() && i < b.len() && a[i] == b[i]) { i++; }
+  let line = fn(lines: Array<Bytes>): Bytes { i < lines.len() ? lines[i] : "(nothing)" };
+  "line " + Std.string(i + 1) + ": " + line(a) + " / jelloc: " + line(b)
+};
+
+// Runs our compiler's --lex on `file`.
+let ourLex = fn(file: Bytes): Tuple<I32, Bytes, Bytes> {
+  run(["jello", "build/jb4.jlo", file, "--lex"], [])
+};
+
+// Our --lex must match jelloc's: the exit status, stdout, and the whole diagnostic on stderr.
+let lexes = fn(file: Bytes): Void {
+  let (ours, ourOut, ourErr) = ourLex(file);
+  let (theirs, theirOut, theirErr) = run(["jelloc", file, "--lex"], []);
+
+  if (ours != theirs) {
+    fail("lex " + file + ": exit " + Std.string(ours) + ", jelloc " + Std.string(theirs));
+  } else if (ourOut != theirOut) {
+    fail("lex " + file + ": token listings differ");
+  } else if (ourErr != theirErr) {
+    fail("lex " + file + ": stderr " + firstDifference(ourErr, theirErr));
+  } else {
+    say("ok   lex " + file);
+  }
+};
+
+// Our first error line for `file` must be `file:` followed by `want`.
+let rejects = fn(name: Bytes, file: Bytes, want: Bytes): Void {
+  let (_, _, err) = ourLex(file);
+
+  if (firstLine(err) == file + ":" + want) {
+    say("ok   " + name + " -> " + want);
+  } else {
+    fail(name + ": " + firstLine(err));
+  }
+};
+
+makeDirs("build");
+let (built, _, buildErr) = run(["jelloc", "src/chapter4/Main.jello", "--out", "build/jb4.jlo"], []);
+
+if (built != 0) {
+  say("FAIL build: " + buildErr);
+  System.exit(1);
+}
+
+for (file in filesUnder(dir, ".jello")) {
+  if (!file.endsWith("/check.jello")) { lexes(file); }
+}
+for (file in filesUnder("src/chapter4", ".jello")) { lexes(file); }
+
+let breaks = [
+  ("cafe", "1:8: unexpected character [E0002]"),
+  ("open", "1:9: unterminated bytes literal [E0005]"),
+  ("escape", "1:11: unknown escape \\q [E0004]"),
+  ("constant", "1:9: invalid constant: 12ab [E0003]"),
+  ("comment", "1:1: unterminated block comment [E0005]"),
+  ("wide", "1:6: unexpected character [E0002]"),
+];
+
+for (example in breaks) {
+  let (name, want) = example;
+  rejects(name, dir + "/" + name + ".jello", want);
+}
+
+// Syntax that jelloc accepts but JellyBaby leaves out.
+let leftOut = [
+  ("float", "1.5", "1:1: invalid constant: 1.5 [E0003]"),
+  ("bare point", "1.", "1:1: invalid constant: 1. [E0003]"),
+  ("exponent", "1.e5", "1:1: invalid constant: 1.e5 [E0003]"),
+  ("float suffix", "1.f16", "1:1: invalid constant: 1.f16 [E0003]"),
+  ("radix", "0x1F", "1:1: invalid constant: 0x1F [E0003]"),
+  ("integer suffix", "1i64", "1:1: invalid constant: 1i64 [E0003]"),
+  ("template", "`a`", "1:1: unexpected character [E0002]"),
+  ("regexp", "~/a/", "1:1: unexpected character [E0002]"),
+  ("unicode escape", "\"\\u{41}\"", "1:2: unknown escape \\u [E0004]"),
+  ("invalid UTF-8", "\xff", "1:1: unexpected character [E0002]"),
+];
+
+for (example in leftOut) {
+  let (name, source, want) = example;
+  writeText("build/left-out.jello", source);
+  rejects(name, "build/left-out.jello", want);
+}
+
+if (failed) {
+  say("some checks failed");
+  System.exit(1);
+}
+say("all checks ok");

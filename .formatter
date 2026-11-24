@@ -1,0 +1,15 @@
+{
+  "inputs": ["src", "scripts", "examples"],
+  "exclude": [
+    "examples/chapter04/cafe.jello",
+    "examples/chapter04/comment.jello",
+    "examples/chapter04/constant.jello",
+    "examples/chapter04/escape.jello",
+    "examples/chapter04/open.jello",
+    "examples/chapter04/tabs.jello",
+    "examples/chapter04/tour.jello",
+    "examples/chapter04/wide.jello",
+    "scripts/CheckAll.jello"
+  ],
+  "rewrite_comments": false
+}

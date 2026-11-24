@@ -1,0 +1,51 @@
+/** @file The command line: `jellybaby input.jello --lex` prints the tokens of the input. */
+
+import { readFile, stdout, stderr, argCount, arg, exit } from support.Os;
+import { lex } from frontend.syntax.Lexer;
+import { printTokens } from frontend.syntax.Tokens;
+
+// Reports a bad command line and returns exit status 2.
+let _badUsage = fn(reason: Bytes): I32 {
+  stderr("jellybaby: " + reason + "\nusage: jellybaby input.jello --lex\n");
+  2
+};
+
+// Runs the command line and returns the exit status.
+let _main = fn(): I32 {
+  let input: ?Bytes = null;
+  let mode: ?Bytes = null;
+  let i = 0;
+
+  while (i < argCount()) {
+    let word = arg(i);
+
+    if (word == "--lex") {
+      mode = word;
+    } else if ((word.len() > 0) && (word.get(0) == "-".code)) {
+      return _badUsage("unknown option: " + word);
+    } else if (input == null) {
+      input = word;
+    } else {
+      return _badUsage("unexpected argument: " + word);
+    }
+    i++;
+  }
+  if ((input == null) || (mode == null)) { return _badUsage("missing input or mode"); }
+
+  let text = readFile(input);
+
+  if (text == null) {
+    stderr("jellybaby: cannot read " + input + "\n");
+    return 1;
+  }
+
+  try {
+    stdout(printTokens(lex(input, text)));
+  } catch (e) {
+    stderr((e as Bytes) + "\n");
+    return 1;
+  }
+  0
+};
+
+exit(_main());

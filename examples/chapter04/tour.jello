@@ -1,0 +1,11 @@
+// lex only: every keyword, operator, comment and escape, in no particular order.
+as await bits break catch const continue do else enum export false fn for from if import is
+let list load macro match new null package prototype return super this throw true try type
+typedef when while with
+... <<= >>= == => != <- <= >= ++ += -- -= -> *= /= << >> && || |> ?? %= &= |= ^=
+( ) { } [ ] ; : , ? . = ! < > + - * / % & | ^
+# a hash comment
+/* a block comment
+   over two lines */ x_1 _y Z9 0 42 2147483648
+"plain" 'single' "\0\a\b\f\n\r\t\v\'\"\\\`" "\x41\x7e\xFF\xc3" "café" "" '"'
+a.b(c)[d]?.e

@@ -1,0 +1,27 @@
+import { run } from std.io.Command;
+import { writeText, listDir } from std.io.File;
+import { startsWith } from std.core.Bytes;
+
+let say = fn(text: Bytes): Void { writeText("/dev/stdout", text); };
+
+let failed = false;
+let entries = listDir("examples");
+let i = 0;
+while (i < entries.len()) {
+  let entry = entries[i];
+  i++;
+  if (!entry.startsWith("chapter")) { continue; }
+  let name = entry.slice(0, entry.len() - 1);
+  let dir = "examples/" + name;
+  say("== " + name + "\n");
+  let (status, out, err) = run(["jelloc", "run", dir + "/check.jello", dir], []);
+  say(out);
+  say(err);
+  if (status != 0) { failed = true; }
+}
+
+if (failed) {
+  say("some chapters failed\n");
+  System.exit(1);
+}
+"all chapters ok"

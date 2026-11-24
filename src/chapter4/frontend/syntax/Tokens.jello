@@ -1,0 +1,94 @@
+package frontend.syntax;
+
+/** @file Tokens, the keyword and operator tables, and the token listing that `--lex` prints. */
+
+import { byteText, escape, join } from support.Text;
+
+export enum TokenKind {
+  Ident;
+  Keyword;
+  Op;
+  Int;
+  Bytes;
+  Eof;
+}
+
+/* A token and the bytes of source it spans, from `start` up to `end`. `text` is how the source
+ * spells it, except that a `Bytes` token holds the value its literal stands for. */
+export typedef Token = {
+  let kind: TokenKind;
+  let text: Bytes;
+  let start: I32;
+  let end: I32;
+};
+
+// Every word the language reserves, including those JellyBaby itself never uses.
+let _keywords = [
+  "as", "await", "bits", "break", "catch", "const", "continue", "do", "else", "enum", "export",
+  "false", "fn", "for", "from", "if", "import", "is", "let", "list", "load", "macro", "match",
+  "new", "null", "package", "prototype", "return", "super", "this", "throw", "true", "try", "type",
+  "typedef", "when", "while", "with",
+];
+
+/* Every operator and punctuation mark, longest first so that the lexer can take the first that
+ * matches, with the name `--lex` prints for each at the same index. */
+export let operators = [
+  "...", "<<=", ">>=",
+  "==", "=>", "!=", "<-", "<=", ">=", "++", "+=", "--", "-=", "->", "*=", "/=", "<<", ">>", "&&",
+  "||", "|>", "??", "%=", "&=", "|=", "^=",
+  "(", ")", "{", "}", "[", "]", ";", ":", ",", "?", ".", "=", "!", "<", ">", "+", "-", "*", "/",
+  "%", "&", "|", "^",
+];
+
+let _operatorNames = [
+  "DotDotDot", "LessLessEqual", "GreaterGreaterEqual",
+  "EqualEqual", "FatArrow", "NotEqual", "LessMinus", "LessEqual", "GreaterEqual", "PlusPlus",
+  "PlusEqual", "MinusMinus", "MinusEqual", "Arrow", "StarEqual", "SlashEqual", "LessLess",
+  "GreaterGreater", "And", "PipePipe", "PipeGreater", "QuestionQuestion", "PercentEqual",
+  "AmpersandEqual", "PipeEqual", "CaretEqual",
+  "LParen", "RParen", "LBrace", "RBrace", "LBracket", "RBracket", "Semicolon", "Colon", "Comma",
+  "Question", "Dot", "Equal", "Not", "Less", "Greater", "Plus", "Minus", "Star", "Slash",
+  "Percent", "Ampersand", "Pipe", "Caret",
+];
+
+// Returns where `item` is in `items`, or -1 if it is not there.
+let _indexOf = fn(items: Array<Bytes>, item: Bytes): I32 {
+  let i = 0;
+  while ((i < items.len()) && (items[i] != item)) { i++; }
+  (i < items.len()) ? i : -1
+};
+
+// Checks whether `word` is a keyword.
+export let isKeyword = fn(word: Bytes): Bool { _indexOf(_keywords, word) >= 0 };
+
+/* Returns the name `--lex` prints for keyword `word`: the word with a capital, except `enum`
+ * and `list`. */
+let _keywordName = fn(word: Bytes): Bytes {
+  if (word == "enum") { return "EnumDecl"; }
+  if (word == "list") { return "ListLiteral"; }
+  byteText(word.get(0) - "a".code + "A".code) + word.slice(1, word.len() - 1)
+};
+
+// Returns the line `--lex` prints for `token`, without its newline.
+let _tokenName = fn(token: Token): Bytes {
+  match (token.kind) {
+    Ident => "Ident(" + escape(token.text) + ")",
+    Keyword => _keywordName(token.text),
+    Op => _operatorNames[_indexOf(operators, token.text)],
+    Int => "IntegerConstant(" + token.text + ", Infer)",
+    Bytes => "BytesLiteral(" + escape(token.text) + ")",
+    Eof => "Eof",
+  }
+};
+
+// Returns the listing `--lex` prints: one token per line.
+export let printTokens = fn(tokens: Array<Token>): Bytes {
+  let lines: Array<Bytes> = [];
+  let i = 0;
+
+  while (i < tokens.len()) {
+    lines.push(_tokenName(tokens[i]) + "\n");
+    i++;
+  }
+  join(lines)
+};
