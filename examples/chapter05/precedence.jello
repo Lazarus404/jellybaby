@@ -1,0 +1,14 @@
+let a = 1;
+let b = 2;
+let missing: ?I32 = null;
+let fallback: ?I32 = null;
+a += b * 3;
+a -= 1;
+b++;
+--a;
+let tests = !(a < b) && (b != 0) || false;
+let choice = a > 1 ? b > 1 ? 10 : 20 : 30;
+let left = 10 - 4 - 3;
+let found = missing ?? fallback ?? 7;
+let mixed = -a + -(b - 1) * 2 % 5;
+a * 1000 + b * 100 + choice + left + found + mixed + (tests ? 1 : 0)

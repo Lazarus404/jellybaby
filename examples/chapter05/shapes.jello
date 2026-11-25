@@ -1,0 +1,46 @@
+package demo.shapes;
+
+import type { Thing } from demo.types;
+load { native } from std;
+
+export typedef Pair = {
+  let left: I32;
+  let right: I32;
+};
+export enum Option { None; Some(value: I32); }
+export const answer: I32 = 42;
+let add = fn(a: I32, b: I32): I32 { a + b };
+let values = [1, 2, 3];
+let point = { x: 1, y: 2 };
+let x = 3;
+let short = { x };
+
+let first = fn(items: Array<I32>, limit: I32): ?I32 {
+  let i = 0;
+
+  while (i < items.len()) {
+    i++;
+
+    if (items[i - 1] > limit) {
+      return items[i - 1];
+    } else if (i > 10) {
+      break;
+    } else {
+      continue;
+    }
+  }
+  if (limit < 0) { throw "negative"; }
+  null
+};
+
+let safe = try { first(values, 1) ?? 0 } catch (e) { (e as Bytes).len() };
+
+match (Option.Some(answer)) {
+  None => "none",
+  Some(0), Some(-1) => "small",
+  Some(n) => {
+    let doubled = add(n, n);
+    "big"
+  }
+  _ => "other"
+}

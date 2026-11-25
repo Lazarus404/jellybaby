@@ -1,0 +1,211 @@
+import { run } from std.io.Command;
+import { writeText, makeDirs } from std.io.File;
+import { dirname, filesUnder } from std.io.Path;
+import { endsWith, indexOf } from std.core.Bytes;
+
+let dir = List.len(System.args) > 0 ? List.head(System.args) : ".";
+let failed = false;
+
+let say = fn(line: Bytes): Void { writeText("/dev/stdout", line + "\n"); };
+
+let fail = fn(line: Bytes): Void {
+  say("FAIL " + line);
+  failed = true;
+};
+
+let firstLine = fn(text: Bytes): Bytes {
+  let end = text.indexOf("\n");
+  end < 0 ? text : text.slice(0, end)
+};
+
+// Runs `compiler` (a built .jlo) on `file` with `flag`.
+let ours = fn(file: Bytes, flag: Bytes, compiler: Bytes = "build/jb5.jlo") {
+  run(["jello", compiler, file, flag], [])
+};
+
+// Builds `main` into `out`, or stops the check.
+let build = fn(main: Bytes, out: Bytes): Void {
+  let (status, _, err) = run(["jelloc", main, "--out", out], []);
+
+  if (status != 0) {
+    say("FAIL build " + main + ": " + err);
+    System.exit(1);
+  }
+};
+
+// Our output for `flag` must match jelloc's: the exit status, stdout and stderr.
+let agrees = fn(file: Bytes, flag: Bytes): Bool {
+  let (status, out, err) = ours(file, flag);
+  let (theirs, theirOut, theirErr) = run(["jelloc", file, flag], []);
+
+  if ((status != theirs) || (out != theirOut) || (err != theirErr)) {
+    fail(flag + " " + file + ": " + firstLine(err) + " / jelloc: " + firstLine(theirErr));
+  } else {
+    say("ok   " + flag + " " + file);
+  }
+  status == 0
+};
+
+// Returns the --ast printout of `file`, after checking that it prints back to itself.
+let reprints = fn(file: Bytes): Bytes {
+  let (_, ast, _) = ours(file, "--ast");
+  writeText("build/ast.jello", ast);
+  let (status, again, err) = ours("build/ast.jello", "--ast");
+
+  if ((status == 0) && (ast == again)) {
+    say("ok   ast " + file);
+  } else {
+    fail("ast " + file + ": " + firstLine(err));
+  }
+  ast
+};
+
+// Our --parse of `file` must fail with `want` after the label and the path.
+let rejects = fn(name: Bytes, file: Bytes, want: Bytes): Void {
+  let (_, _, err) = ours(file, "--parse");
+
+  if (firstLine(err) == "PARSER\t" + file + ":" + want) {
+    say("ok   " + name + " -> " + want);
+  } else {
+    fail(name + ": " + firstLine(err));
+  }
+};
+
+makeDirs("build");
+build("src/chapter5/Main.jello", "build/jb5.jlo");
+
+let sources = filesUnder("src/chapter5", ".jello");
+let files = filesUnder(dir, ".jello");
+for (file in filesUnder("examples/chapter04", ".jello")) { files.push(file); }
+for (file in sources) { files.push(file); }
+
+// Each file that parses, with its printout.
+let parsed: Array<Bytes> = [];
+let asts: Array<Bytes> = [];
+
+for (file in files) {
+  if (file.endsWith("/check.jello")) { continue; }
+  agrees(file, "--lex");
+
+  if (agrees(file, "--parse")) {
+    parsed.push(file);
+    asts.push(reprints(file));
+  }
+}
+
+// Returns the printout of `file`, or "" after a failure if it did not parse.
+let astOf = fn(file: Bytes): Bytes {
+  let i = parsed.indexOf(file);
+  if (i < 0) { fail("no printout of " + file); }
+  i < 0 ? "" : asts[i]
+};
+
+// The printout must mean what the original means, as the real parser reads it.
+for (name in ["examples/chapter04/fib", dir + "/calc", dir + "/precedence"]) {
+  writeText("build/ast.jello", astOf(name + ".jello"));
+  let (status, want, _) = run(["jelloc", "run", name + ".jello"], []);
+  let (againStatus, got, err) = run(["jelloc", "run", "build/ast.jello"], []);
+  let same = (status == 0) && (againStatus == 0) && (want == got);
+
+  if (same) {
+    say("ok   meaning " + name + " -> " + want);
+  } else {
+    fail("meaning " + name + ": " + firstLine(err));
+  }
+}
+
+// The compiler rebuilt from its own printout must print every example as the original does.
+for (file in sources) {
+  let copy = "build/ast/" + file.slice(4, file.len() - 4);
+  makeDirs(dirname(copy));
+  writeText(copy, astOf(file));
+}
+build("build/ast/chapter5/Main.jello", "build/jb5ast.jlo");
+
+for (file in parsed) {
+  let (_, got, _) = ours(file, "--ast", "build/jb5ast.jlo");
+  if (astOf(file) == got) { say("ok   rebuilt " + file); } else { fail("rebuilt " + file); }
+}
+
+let breaks = [
+  ("semicolon", "2:3: ParseError: expected ';' or end of input [E0100]"),
+  ("paren", "1:15: ParseError: expected ')', found ';' [E0100]"),
+  ("assign", "2:3: ParseError: invalid assignment target [E0103]"),
+  (
+    "chain",
+    "3:7: ParseError: assignments do not chain; assign each target in its own statement [E0103]"
+  ),
+];
+
+for (example in breaks) {
+  let (name, want) = example;
+  rejects(name, dir + "/" + name + ".jello", want);
+}
+
+// Corners where our parser must agree with jelloc.
+let corners = [
+  "(if (true) { 1 } else { 2 }) let y = 2;",
+  "match (x) { 1 => { a: 1 }, _ => 2 }",
+  "match (x) { 1 => {}, _ => 2 }",
+  "let a: Array<Array<I32>>> x;",
+  "match (x) { 1 => ({ a: 1 }), _ => 2 }",
+  "match (x) { -y => 1 }",
+  "match (c) { \"\\xc0\\x80\".code => 1, _ => 2 }",
+  "match (c) { \"\\xed\\xa0\\x80\".code => 1, _ => 2 }",
+  "match (c) { \"\\xf4\\x90\\x80\\x80\".code => 1, _ => 2 }",
+  "match (c) { \"\\xf4\\x8f\\xbf\\xbf\".code => 1, _ => 2 }",
+  "{",
+  "let x = {",
+  "match (x) { 1 => {",
+  "let a = 1;\n\"\";\nlet b = ;",
+  "match (c) { \"ab\".code => 1, _ => 2 }",
+  "match (c) { \"\\xff\".code => 1, _ => 2 }",
+  "match (c) { \"a\".size => 1, _ => 2 }",
+  "match (c) { \"\u{e9}\".code => 1, _ => 2 }",
+  "let a: Array<Array<I32>>= [];",
+];
+
+for (source in corners) {
+  writeText("build/corner.jello", source);
+  if (agrees("build/corner.jello", "--parse")) { reprints("build/corner.jello"); }
+}
+
+// Syntax that jelloc accepts but JellyBaby leaves out.
+let leftOut = [
+  ("tuple", "let t = (1, 2);", "1:11: ParseError: expected ')', found ',' [E0100]"),
+  ("destructuring", "let (a, b) = t;", "1:5: ParseError: expected identifier, found '(' [E0100]"),
+  ("for", "for (x in xs) { }", "1:1: ParseError: expected expression [E0100]"),
+  ("do", "do { } while (x);", "1:1: ParseError: expected expression [E0100]"),
+  ("pipe", "x |> f;", "1:3: ParseError: expected ';' or end of input [E0100]"),
+  ("bit operator", "a << 2;", "1:3: ParseError: expected ';' or end of input [E0100]"),
+  ("object pattern", "match (x) { { a } => 1 }", "1:13: ParseError: expected pattern [E0100]"),
+  ("bytes pattern", "match (s) { \"a\" => 1 }", "1:13: ParseError: expected pattern [E0100]"),
+  ("bool pattern", "match (x) { true => 1 }", "1:13: ParseError: expected pattern [E0100]"),
+  ("macro", "macro m() { }", "1:1: ParseError: expected expression [E0100]"),
+  ("list literal", "list[1, 2];", "1:1: ParseError: expected expression [E0100]"),
+  ("spread", "f(...xs);", "1:3: ParseError: expected expression [E0100]"),
+  (
+    "default parameter",
+    "let f = fn(a: I32 = 1) { a };",
+    "1:19: ParseError: expected ')', found '=' [E0100]"
+  ),
+  ("type alias", "typedef A = I32;", "1:13: ParseError: expected '{', found 'I32' [E0100]"),
+  ("import as", "import a.b as c;", "1:8: ParseError: expected '{', found 'a' [E0100]"),
+  (
+    "let tail",
+    "let x = 1",
+    "1:10: ParseError: a `let` test can only be the condition of an `if` or a `while` [E0109]"
+  ),
+];
+
+for (example in leftOut) {
+  let (name, source, want) = example;
+  writeText("build/left-out.jello", source);
+  rejects(name, "build/left-out.jello", want);
+}
+
+if (failed) {
+  say("some checks failed");
+  System.exit(1);
+}
+say("all checks ok");
