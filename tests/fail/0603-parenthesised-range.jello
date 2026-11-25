@@ -1,0 +1,1 @@
+1 + ((2147483648)) // error: 1:5: integer literal 2147483648 is out of range for I32 (-2147483648 to 2147483647) [E0007]

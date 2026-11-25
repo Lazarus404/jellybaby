@@ -111,6 +111,34 @@ let _exprAt = fn(expr: Expr): I32 {
   }
 };
 
+// Returns `expr` at position `at`, which a parenthesised expression takes from its `(`.
+let _movedTo = fn(expr: Expr, at: I32): Expr {
+  match (expr) {
+    Int(_, digits) => Expr.Int(at, digits),
+    Bytes(_, value) => Expr.Bytes(at, value),
+    Bool(_, value) => Expr.Bool(at, value),
+    Null(_) => Expr.Null(at),
+    Name(_, name) => Expr.Name(at, name),
+    Unary(_, op, operand) => Expr.Unary(at, op, operand),
+    Binary(_, op, left, right) => Expr.Binary(at, op, left, right),
+    Assign(_, op, target, value) => Expr.Assign(at, op, target, value),
+    Step(_, op, prefix, target) => Expr.Step(at, op, prefix, target),
+    Conditional(_, condition, then, otherwise) => Expr.Conditional(at, condition, then, otherwise),
+    Coalesce(_, left, right) => Expr.Coalesce(at, left, right),
+    Cast(_, value, ty) => Expr.Cast(at, value, ty),
+    Call(_, callee, args) => Expr.Call(at, callee, args),
+    Member(_, object, name) => Expr.Member(at, object, name),
+    Index(_, object, index) => Expr.Index(at, object, index),
+    Function(_, params, result, body) => Expr.Function(at, params, result, body),
+    If(_, condition, then, otherwise) => Expr.If(at, condition, then, otherwise),
+    Match(_, subject, arms) => Expr.Match(at, subject, arms),
+    Try(_, body, name, handler) => Expr.Try(at, body, name, handler),
+    BlockExpr(_, block) => Expr.BlockExpr(at, block),
+    ArrayLit(_, items) => Expr.ArrayLit(at, items),
+    RecordLit(_, fields) => Expr.RecordLit(at, fields),
+  }
+};
+
 let _assignable = fn(expr: Expr): Bool {
   match (expr) { Name(_, _), Member(_, _, _), Index(_, _, _) => true, _ => false }
 };
@@ -350,7 +378,7 @@ let _keywordExpr = fn(token: Token): Expr {
 
 let _primary = fn(): Expr {
   let at = _peek().start;
-  if (_at("(")) { return _parenthesised(); }
+  if (_at("(")) { return _movedTo(_parenthesised(), at); }
   if (_accept("[")) { return Expr.ArrayLit(at, _exprList("]")); }
   if (_at("{")) { return _braceIsRecord() ? _record(at) : Expr.BlockExpr(at, _block()); }
   let token = _next();

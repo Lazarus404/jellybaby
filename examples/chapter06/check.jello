@@ -1,0 +1,97 @@
+import { run } from std.io.Command;
+import { makeDirs, writeText } from std.io.File;
+import { indexOf } from std.core.Bytes;
+
+let dir = List.len(System.args) > 0 ? List.head(System.args) : "examples/chapter06";
+let compiler = "build/jb6.jlo";
+let text = "build/check.jlo.txt";
+let module = "build/check.jlo";
+let failed = false;
+
+let say = fn(line: Bytes): Void { writeText("/dev/stdout", line + "\n"); };
+
+let fail = fn(line: Bytes): Void {
+  say("FAIL " + line);
+  failed = true;
+};
+
+let firstLine = fn(text: Bytes): Bytes {
+  let end = text.indexOf("\n");
+  end < 0 ? text : text.slice(0, end)
+};
+
+// Returns what `file` prints through our compiler, the assembler and the VM, or the first error.
+let ours = fn(file: Bytes): Bytes {
+  let (compiled, _, err) = run(["jello", compiler, file, "--out", text], []);
+  if (compiled != 0) { return firstLine(err); }
+  let (assembled, _, asmErr) = run(["jlo_tool", "asm", text, "-o", module], []);
+  if (assembled != 0) { return firstLine(asmErr); }
+  let (_, out, runErr) = run(["jlo_tool", "run", "--print", "--fuel", "10000000", module], []);
+  out + runErr
+};
+
+// Checks that `file` prints `want` through our compiler and through jelloc.
+let prints = fn(name: Bytes, file: Bytes, want: Bytes): Void {
+  let got = ours(file);
+  let (_, theirs, _) = run(["jelloc", "run", file], []);
+
+  if ((got == want) && (theirs == want)) {
+    say("ok   " + name + " -> " + firstLine(want));
+  } else {
+    fail(name + ": " + firstLine(got) + " / jelloc: " + firstLine(theirs));
+  }
+};
+
+// Checks that jelloc runs `source` but our compiler stops with exactly `want`.
+let notYet = fn(name: Bytes, source: Bytes, want: Bytes): Void {
+  writeText("build/not-yet.jello", source);
+  let (status, _, err) = run(["jello", compiler, "build/not-yet.jello"], []);
+  let (theirs, _, _) = run(["jelloc", "run", "build/not-yet.jello"], []);
+
+  if ((status == 1) && (err == want) && (theirs == 0)) {
+    say("ok   " + name + " not supported yet");
+  } else {
+    fail(name + ": " + firstLine(err));
+  }
+};
+
+// Returns a sum of `count` ones.
+let ones = fn(count: I32): Bytes {
+  let text = "1";
+  let i = 1;
+
+  while (i < count) {
+    text += " + 1";
+    i++;
+  }
+  text
+};
+
+makeDirs("build");
+let (built, _, buildErr) = run(["jelloc", "src/chapter6/Main.jello", "--out", compiler], []);
+
+if (built != 0) {
+  say("FAIL build: " + buildErr);
+  System.exit(1);
+}
+prints("demo", dir + "/calc.jello", "7\n");
+
+let statements = "build/not-yet.jello:1:1: not supported yet: statements\n1 + 2; 3\n^\n";
+notYet("statements", "1 + 2; 3", statements);
+
+// 128 terms need 255 registers, which fit; 129 need 257, one more than a function can have.
+writeText("build/wide.jello", ones(128));
+prints("128 terms", "build/wide.jello", "128\n");
+let wider = ones(129);
+let large = "build/not-yet.jello:1:1: not supported yet: large expression\n";
+notYet("129 terms", wider, large + wider + "\n^\n");
+
+let (corpus, corpusOut, corpusErr) = run(["jelloc", "run", "scripts/Corpus.jello", "6"], []);
+writeText("/dev/stdout", corpusOut + corpusErr);
+if (corpus != 0) { failed = true; }
+
+if (failed) {
+  say("some checks failed");
+  System.exit(1);
+}
+say("all checks ok");

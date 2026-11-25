@@ -1,0 +1,152 @@
+package backend.jello;
+
+/** @file Writes a text JLO module for one integer expression. */
+
+import type { Expr, Program } from frontend.syntax.Ast;
+import { errorAt } from frontend.syntax.Source;
+import { intText, join } from support.Text;
+
+let _types: Array<Bytes> = [];
+let _regTypes: Array<Bytes> = [];
+let _code: Array<Bytes> = [];
+
+// Stops at a construct not built yet; the I32 result lets it stand where a register is expected.
+let _unsupported = fn(at: I32, construct: Bytes): I32 {
+  throw errorAt(at, "", "not supported yet: " + construct);
+  0
+};
+
+// Adds a register of type `ty` for the node at `at`, interning the type.
+let _reg = fn(at: I32, ty: Bytes): I32 {
+  if (_regTypes.len() == 256) { return _unsupported(at, "large expression"); }
+  let found = false;
+  let i = 0;
+
+  while (i < _types.len()) {
+    if (_types[i] == ty) { found = true; }
+    i++;
+  }
+  if (!found) { _types.push(ty); }
+  _regTypes.push(ty);
+  _regTypes.len() - 1
+};
+
+let _insn = fn(op: Bytes, a: I32, b: I32, c: I32, imm: I32): Void {
+  let n = _code.len();
+  _code.push(
+    "  " + intText(n) + ": " + op + " a=r" + intText(a) + " b=r" + intText(b)
+    + " c=r" + intText(c) + " imm=" + intText(imm) + "\n"
+  );
+};
+
+let _list = fn(items: Array<Bytes>): Bytes {
+  let parts: Array<Bytes> = [];
+  let i = 0;
+
+  while (i < items.len()) {
+    if (i > 0) { parts.push(", "); }
+    parts.push(items[i]);
+    i++;
+  }
+  join(parts)
+};
+
+let _moduleText = fn(): Bytes {
+  join([
+    ".jlo module version=1 features=[] entry=0\n",
+    "types: [" + _list(_types) + "]\n",
+    "sigs: []\n",
+    "atoms: []\n",
+    "struct_sigs: []\n",
+    "func[0] nregs=" + intText(_regTypes.len()) + " nargs=0 reg_types=[" + _list(_regTypes)
+    + "]\n",
+    join(_code),
+  ])
+};
+
+/* Reads a decimal literal into its negative representation, which includes I32's otherwise
+ * unrepresentable minimum value. A negative literal is reported from its minus sign at `at`. */
+let _literal = fn(at: I32, digits: Bytes, negative: Bool): I32 {
+  let limit = negative ? -2147483648 : -2147483647;
+  let value = 0;
+  let i = 0;
+
+  while (i < digits.len()) {
+    let digit = digits.get(i) - "0".code;
+
+    if (value < (limit + digit) / 10) {
+      let text = (negative ? "-" : "") + digits;
+      let range = " is out of range for I32 (-2147483648 to 2147483647)";
+      throw errorAt(at, "E0007", "integer literal " + text + range);
+    }
+    value = value * 10 - digit;
+    i++;
+  }
+  negative ? value : -value
+};
+
+let _expr = fn(expr: Expr): I32 {
+  match (expr) {
+    Int(at, digits) => {
+      let out = _reg(at, "I32");
+      _insn("CONST_I32", out, 0, 0, _literal(at, digits, false));
+      out
+    },
+    Unary(at, op, operand) => {
+      if (op != "-") { return _unsupported(at, "comparison"); }
+
+      match (operand) {
+        Int(_, digits) => {
+          let out = _reg(at, "I32");
+          _insn("CONST_I32", out, 0, 0, _literal(at, digits, true));
+          return out;
+        },
+        _ => null,
+      };
+      let value = _expr(operand);
+      let out = _reg(at, "I32");
+      _insn("NEG_I32", out, value, 0, 0);
+      out
+    },
+    Binary(at, op, left, right) => {
+      let name = (op == "+") ? "ADD_I32" : (op == "-") ? "SUB_I32" : (op == "*")
+        ? "MUL_I32" : (op == "/") ? "DIV_I32" : (op == "%") ? "MOD_I32" : "";
+      if (name == "") { return _unsupported(at, "comparison"); }
+      let a = _expr(left);
+      let b = _expr(right);
+      let out = _reg(at, "I32");
+      _insn(name, out, a, b, 0);
+      out
+    },
+    Bytes(at, _) => _unsupported(at, "bytes literal"),
+    Name(at, _) => _unsupported(at, "name"),
+    Bool(at, _) => _unsupported(at, "bool literal"),
+    Null(at) => _unsupported(at, "null"),
+    Function(at, _, _, _) => _unsupported(at, "function"),
+    Assign(at, _, _, _), Step(at, _, _, _) => _unsupported(at, "assignment"),
+    Conditional(at, _, _, _), Coalesce(at, _, _) => _unsupported(at, "conditional"),
+    Cast(at, _, _) => _unsupported(at, "cast"),
+    Call(at, _, _) => _unsupported(at, "call"),
+    Member(at, _, _), Index(at, _, _) => _unsupported(at, "member access"),
+    If(at, _, _, _) => _unsupported(at, "if"),
+    Match(at, _, _) => _unsupported(at, "match"),
+    Try(at, _, _, _) => _unsupported(at, "try"),
+    BlockExpr(at, _) => _unsupported(at, "block"),
+    ArrayLit(at, _) => _unsupported(at, "array literal"),
+    RecordLit(at, _) => _unsupported(at, "record literal"),
+  }
+};
+
+// Emits a complete module, or throws at the first construct not built yet.
+export let emit = fn(program: Program): Bytes {
+  _types = [];
+  _regTypes = [];
+  _code = [];
+
+  if ((program.block.statements.len() != 0) || (program.block.tail == null)) {
+    _unsupported(0, "statements");
+  }
+  let result = _expr(program.block.tail);
+  _insn("RET", result, 0, 0, 0);
+  _moduleText()
+};

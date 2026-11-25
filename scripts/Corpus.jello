@@ -1,0 +1,123 @@
+import { run } from std.io.Command;
+import { exists, makeDirs, readText, writeText } from std.io.File;
+import { filesUnder } from std.io.Path;
+import { endsWith, indexOf, startsWith } from std.core.Bytes;
+
+let chapter = List.len(System.args) == 0 ? "6" : List.head(System.args);
+let compiler = "build/jb" + chapter + ".jlo";
+let chapterNumber = 0;
+for (c in chapter) { chapterNumber = chapterNumber * 10 + c - "0".code; }
+let passed = 0;
+let failed = 0;
+
+let say = fn(text: Bytes): Void { writeText("/dev/stdout", text + "\n"); };
+
+let line = fn(text: Bytes): Bytes {
+  let end = text.indexOf("\n");
+  end < 0 ? text : text.slice(0, end)
+};
+
+// Returns `text` from byte `start` to its end.
+let rest = fn(text: Bytes, start: I32): Bytes { text.slice(start, text.len() - start) };
+
+let report = fn(ok: Bool, section: Bytes, name: Bytes, why: Bytes = ""): Void {
+  say((ok ? "ok   " : "FAIL ") + section + " " + name + (ok ? "" : ": " + why));
+  if (ok) { passed++; } else { failed++; }
+};
+
+let ours = fn(file: Bytes, flag: Bytes) {
+  run(flag == "" ? ["jello", compiler, file] : ["jello", compiler, file, flag], [])
+};
+
+// Returns the chapter a test arrives in, from the first two digits of its name.
+let chapterOf = fn(file: Bytes): I32 {
+  let slash = file.lastIndexOf("/");
+  (file.get(slash + 1) - "0".code) * 10 + file.get(slash + 2) - "0".code
+};
+
+// Returns the first line of `text` without its stage label or the `file:` before the position.
+let firstDiagnostic = fn(text: Bytes, file: Bytes): Bytes {
+  let first = line(text);
+  let unlabelled = rest(first, first.indexOf("\t") + 1);
+  unlabelled.startsWith(file + ":") ? rest(unlabelled, file.len() + 1) : unlabelled
+};
+
+let expectedError = fn(file: Bytes): Bytes {
+  let first = line(readText(file));
+  rest(first, first.indexOf("// error: ") + 10)
+};
+
+// Returns a run's output, or `trap KIND` if it trapped, so that both compilers' runs compare.
+let normalRun = fn(status: I32, out: Bytes, err: Bytes): Bytes {
+  let trap = err.indexOf("TRAP code=");
+  ((status != 0) && (trap >= 0)) ? "trap " + line(rest(err, trap + 10)) + "\n" : out
+};
+
+makeDirs("build");
+let main = "src/chapter" + chapter + "/Main.jello";
+let (built, _, buildErr) = run(["jelloc", main, "--out", compiler], []);
+
+if (built != 0) {
+  say("FAIL build: " + line(buildErr));
+  System.exit(1);
+}
+
+let files: Array<Bytes> = [];
+let n = 4;
+
+while (n <= chapterNumber) {
+  let dir = "examples/chapter" + (n < 10 ? "0" : "") + Std.string(n);
+  if (exists(dir)) { for (file in filesUnder(dir, ".jello")) { files.push(file); } }
+  n++;
+}
+for (file in filesUnder("tests", ".jello")) { files.push(file); }
+for (file in filesUnder("src/chapter" + chapter, ".jello")) { files.push(file); }
+
+for (file in files) {
+  if (file.endsWith("/check.jello")) { continue; }
+  let (status, out, err) = ours(file, "--lex");
+  let (wantStatus, wantOut, wantErr) = run(["jelloc", file, "--lex"], []);
+  let lexed = (status == wantStatus) && (out == wantOut) && (line(err) == line(wantErr));
+  report(lexed, "lex", file, line(err) + " / " + line(wantErr));
+  if (readText(file).startsWith("// lex only")) { continue; }
+
+  let (parsed, _, parseErr) = ours(file, "--parse");
+  let (wantParsed, _, wantParseErr) = run(["jelloc", file, "--parse"], []);
+  let agrees = (parsed == wantParsed) && (line(parseErr) == line(wantParseErr));
+  report(agrees, "parse", file, line(parseErr) + " / " + line(wantParseErr));
+  if (parsed != 0) { continue; }
+
+  let (_, ast, _) = ours(file, "--ast");
+  writeText("build/corpus.ast.jello", ast);
+  let (again, astAgain, astErr) = ours("build/corpus.ast.jello", "--ast");
+  report((again == 0) && (ast == astAgain), "ast", file, line(astErr));
+}
+
+for (file in filesUnder("tests/run", ".jello")) {
+  if (chapterOf(file) > chapterNumber) { continue; }
+  let base = file.slice(0, file.len() - 6);
+  let name = rest(base, base.lastIndexOf("/") + 1);
+  let text = "build/" + name + ".jlo.txt";
+  let module = "build/" + name + ".jlo";
+  let (compiled, _, compileErr) = run(["jello", compiler, file, "--out", text], []);
+  let assemble = ["jlo_tool", "asm", text, "-o", module];
+  let (assembled, _, asmErr) = compiled == 0 ? run(assemble, []) : (1, "", "");
+  let execute = ["jlo_tool", "run", "--print", "--fuel", "10000000", module];
+  let (ran, out, err) = assembled == 0 ? run(execute, []) : (1, "", "");
+  let got = normalRun(ran, out, err);
+  let ok = (compiled == 0) && (assembled == 0) && (got == readText(base + ".out"));
+  report(ok, "run", name, line(compileErr + asmErr + err));
+}
+
+for (file in filesUnder("tests/fail", ".jello")) {
+  if (chapterOf(file) > chapterNumber) { continue; }
+  let want = expectedError(file);
+  let (_, _, err) = ours(file, "");
+  let (theirs, _, theirErr) = run(["jelloc", file, "--out", "build/fail.jlo"], []);
+  let got = firstDiagnostic(err, file);
+  let wanted = firstDiagnostic(theirErr, file);
+  report((got == want) && (theirs != 0) && (wanted == want), "fail", file, got + " / " + wanted);
+}
+
+say("corpus: " + Std.string(passed) + " passed, " + Std.string(failed) + " failed");
+System.exit(failed == 0 ? 0 : 1);

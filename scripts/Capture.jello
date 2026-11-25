@@ -1,0 +1,33 @@
+import { run } from std.io.Command;
+import { exists, makeDirs, readText, writeText } from std.io.File;
+import { indexOf } from std.core.Bytes;
+
+let args = System.args;
+let write = List.contains(args, "--write");
+makeDirs("build/capture");
+
+for (file in args) {
+  if (file == "--write") { continue; }
+  let slash = file.lastIndexOf("/");
+  let name = file.slice(slash + 1, file.len() - slash - 7);
+  let module = "build/capture/" + name + ".jlo";
+  let (compiled, _, compileErr) = run(["jelloc", file, "--out", module], []);
+  if (compiled != 0) { throw compileErr; }
+  let (status, out, err) = run(["jlo_tool", "run", "--print", "--fuel", "10000000", module], []);
+  let trap = err.indexOf("TRAP code=");
+
+  if ((status != 0) && (trap >= 0)) {
+    let start = trap + 10;
+    let end = err.slice(start, err.len() - start).indexOf("\n");
+    out = "trap " + (end < 0 ? err.slice(start, err.len() - start) : err.slice(start, end)) + "\n";
+  } else if (status != 0) {
+    throw err;
+  }
+  let path = file.slice(0, file.len() - 6) + ".out";
+
+  if (!exists(path) || write) {
+    writeText(path, out);
+  } else if (readText(path) != out) {
+    writeText("/dev/stdout", "DIFF " + path + "\nwant: " + readText(path) + "got:  " + out);
+  }
+}
