@@ -1,0 +1,68 @@
+package frontend.hir;
+
+/** @file Prints the typed tree in jelloc's `--hir` format. */
+
+import type { HirExpr, HirOp, HirProgram, HirStmt } from frontend.hir.Hir;
+import { typeOf } from frontend.hir.Hir;
+import { hirName } from frontend.semantics.Types;
+import { escape, intText, join } from support.Text;
+
+let _typed = fn(expr: HirExpr): Bytes { ": " + hirName(typeOf(expr)) + "\n" };
+
+// Prints `expr` as `name`, with its one or two operands below it.
+let _operation = fn(
+  name: Bytes,
+  expr: HirExpr,
+  left: HirExpr,
+  right: ?HirExpr,
+  indent: Bytes
+): Bytes {
+  indent + name + _typed(expr) + _expr(left, indent + "  ")
+    + (right == null ? "" : _expr(right, indent + "  "))
+};
+
+let _opName = fn(op: HirOp, operand: HirExpr): Bytes { match (op) {
+  Add => "add.wrap", Sub => "sub.wrap", Mul => "mul.wrap", Div => "div.wrap", Rem => "rem.wrap",
+  Neg => "neg.wrap", Not => "not.bool", And => "and", Or => "or",
+  Eq => "eq." + hirName(typeOf(operand)), Lt => "lt.s.i32", Gt => "gt.s.i32",
+  BytesEq => "bytes.eq", BytesConcat => "bytes.concat",
+} };
+
+let _statements = fn(statements: Array<HirStmt>, indent: Bytes): Bytes {
+  let parts: Array<Bytes> = [];
+  let i = 0;
+
+  while (i < statements.len()) {
+    parts.push(_stmt(statements[i], indent));
+    i++;
+  }
+  join(parts)
+};
+
+let _expr = fn(expr: HirExpr, indent: Bytes): Bytes { match (expr) {
+  Int(_, value) => indent + "i32 " + intText(value) + _typed(expr),
+  Bool(_, value) => indent + "bool " + (value ? "true" : "false") + _typed(expr),
+  Bytes(_, value) => indent + "bytes " + escape(value) + _typed(expr),
+  Null(_) => indent + "null" + _typed(expr),
+  Local(_, id, _) => indent + "local %" + intText(id) + _typed(expr),
+  Global(_, id, _) => indent + "global g" + intText(id) + _typed(expr),
+  Assign(_, id, value) => _operation("assign %" + intText(id), expr, value, null, indent),
+  SetGlobal(_, id, value) => _operation("global.set g" + intText(id), expr, value, null, indent),
+  Unary(_, op, operand) => _operation(_opName(op, operand), expr, operand, null, indent),
+  Binary(_, op, left, right) => _operation(_opName(op, left), expr, left, right, indent),
+  Block(_, statements, tail) => indent + "block" + _typed(expr)
+    + _statements(statements, indent + "  ") + _expr(tail, indent + "  "),
+} };
+
+let _stmt = fn(stmt: HirStmt, indent: Bytes): Bytes { match (stmt) {
+  Global(_, id, name, value) => indent + "global g" + intText(id) + " " + name + _typed(value)
+    + _expr(value, indent + "  "),
+  Let(_, id, name, isConst, value) => indent + (isConst ? "const" : "let") + " %" + intText(id)
+    + " " + name + _typed(value) + _expr(value, indent + "  "),
+  Expression(value) => indent + "expression\n" + _expr(value, indent + "  "),
+  Block(statements) => indent + "block\n" + _statements(statements, indent + "  "),
+} };
+
+export let printHir = fn(program: HirProgram): Bytes {
+  "program\n" + _statements(program.statements, "  ") + _expr(program.tail, "  ")
+};

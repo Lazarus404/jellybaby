@@ -1,0 +1,11 @@
+program
+  global g0 x: i32
+    i32 1: i32
+  block
+    let %0 a: i32
+      i32 10: i32
+    expression
+      add.wrap: i32
+        local %0: i32
+        global g0: i32
+  global g0: i32

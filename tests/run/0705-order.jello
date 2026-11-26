@@ -1,0 +1,7 @@
+let x = 1;
+let a = x + (x = 2);
+x = 1;
+let b = (x = 2) + (x = 3);
+x = 1;
+let c = x > (x = 0);
+c

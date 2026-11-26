@@ -1,0 +1,2 @@
+// error: 2:14: x is annotated I32, but its value is Bytes [E0400]
+let x: I32 = "text";

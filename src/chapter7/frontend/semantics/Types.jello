@@ -1,0 +1,35 @@
+package frontend.semantics;
+
+/** @file The types a value can have, and how they are named. */
+
+import type { TypeExpr } from frontend.syntax.Ast;
+import { errorAt } from frontend.syntax.Source;
+
+export enum Type { I32; Bool; Bytes; Null; }
+
+export let typeName = fn(ty: Type): Bytes { match (ty) {
+  I32 => "I32", Bool => "Bool", Bytes => "Bytes", Null => "Null",
+} };
+
+export let hirName = fn(ty: Type): Bytes { match (ty) {
+  I32 => "i32", Bool => "bool", Bytes => "bytes", Null => "null",
+} };
+
+export let sameType = fn(a: Type, b: Type): Bool { match (a) {
+  I32 => match (b) { I32 => true, _ => false },
+  Bool => match (b) { Bool => true, _ => false },
+  Bytes => match (b) { Bytes => true, _ => false },
+  Null => match (b) { Null => true, _ => false },
+} };
+
+export let resolve = fn(ty: TypeExpr): Type { match (ty) {
+  Named(at, name) => {
+    if (name == "I32") { return Type.I32; }
+    if (name == "Bool") { return Type.Bool; }
+    if (name == "Bytes") { return Type.Bytes; }
+    throw errorAt(at, "E0401", "unknown type: " + name);
+  },
+  Generic(at, _, _) => { throw errorAt(at, "", "not supported yet: generic type"); },
+  Optional(at, _) => { throw errorAt(at, "", "not supported yet: optional type"); },
+  Function(at, _, _) => { throw errorAt(at, "", "not supported yet: function type"); },
+} };

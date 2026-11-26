@@ -1,0 +1,2 @@
+// error: 2:1: Bytes support only +, == and != [E0500]
+"a" < "b"

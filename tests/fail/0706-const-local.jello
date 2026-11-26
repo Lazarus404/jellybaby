@@ -1,0 +1,5 @@
+// error: 4:3: cannot assign to immutable local: x [E0303]
+{
+  const x = 1;
+  x = 2
+}

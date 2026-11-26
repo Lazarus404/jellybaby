@@ -1,0 +1,2 @@
+// error: 2:1: negation requires a number operand, not Bool [E0500]
+-true

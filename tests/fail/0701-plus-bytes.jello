@@ -1,0 +1,2 @@
+// error: 2:1: operator + is not defined for I32 and Bytes [E0500]
+1 + "a"

@@ -1,0 +1,133 @@
+import { run } from std.io.Command;
+import { makeDirs, writeText } from std.io.File;
+import { indexOf } from std.core.Bytes;
+
+let dir = List.len(System.args) > 0 ? List.head(System.args) : "examples/chapter07";
+let compiler = "build/jb7.jlo";
+let text = "build/check.jlo.txt";
+let module = "build/check.jlo";
+let failed = false;
+
+let say = fn(line: Bytes): Void { writeText("/dev/stdout", line + "\n"); };
+
+let fail = fn(line: Bytes): Void {
+  say("FAIL " + line);
+  failed = true;
+};
+
+let firstLine = fn(text: Bytes): Bytes {
+  let end = text.indexOf("\n");
+  end < 0 ? text : text.slice(0, end)
+};
+
+// Returns what `file` prints through our compiler, the assembler and the VM, or the first error.
+let ours = fn(file: Bytes): Bytes {
+  let (compiled, _, err) = run(["jello", compiler, file, "--out", text], []);
+  if (compiled != 0) { return firstLine(err); }
+  let (assembled, _, asmErr) = run(["jlo_tool", "asm", text, "-o", module], []);
+  if (assembled != 0) { return firstLine(asmErr); }
+  let (_, out, runErr) = run(["jlo_tool", "run", "--print", "--fuel", "10000000", module], []);
+  out + runErr
+};
+
+// Checks that `source` prints `want` through our compiler and through jelloc.
+let prints = fn(name: Bytes, source: Bytes, want: Bytes): Void {
+  writeText("build/prints.jello", source);
+  let got = ours("build/prints.jello");
+  let (_, theirs, _) = run(["jelloc", "run", "build/prints.jello"], []);
+
+  if ((got == want) && (theirs == want)) {
+    say("ok   " + name + " -> " + firstLine(want));
+  } else {
+    fail(name + ": " + firstLine(got) + " / jelloc: " + firstLine(theirs));
+  }
+};
+
+// Checks that both compilers reject `file` with the same diagnostic, whose first line is `want`.
+let rejects = fn(name: Bytes, file: Bytes, want: Bytes): Void {
+  let (status, _, err) = run(["jello", compiler, file], []);
+  let (theirs, _, theirErr) = run(["jelloc", file, "--out", module], []);
+
+  if ((status == 1) && (theirs == 1) && (err == theirErr) && (firstLine(err) == want)) {
+    say("ok   " + name + " -> " + want);
+  } else {
+    fail(name + ": " + firstLine(err) + " / jelloc: " + firstLine(theirErr));
+  }
+};
+
+// Checks that jelloc runs `source` but our compiler stops with exactly `want`.
+let notYet = fn(name: Bytes, source: Bytes, want: Bytes): Void {
+  writeText("build/not-yet.jello", source);
+  let (status, _, err) = run(["jello", compiler, "build/not-yet.jello"], []);
+  let (theirs, _, _) = run(["jelloc", "run", "build/not-yet.jello"], []);
+
+  if ((status == 1) && (err == want) && (theirs == 0)) {
+    say("ok   " + name + " not supported yet");
+  } else {
+    fail(name + ": " + firstLine(err));
+  }
+};
+
+// Returns a sum of `count` ones.
+let ones = fn(count: I32): Bytes {
+  let text = "1";
+  let i = 1;
+
+  while (i < count) {
+    text += " + 1";
+    i++;
+  }
+  text
+};
+
+makeDirs("build");
+let (built, _, buildErr) = run(["jelloc", "src/chapter7/Main.jello", "--out", compiler], []);
+
+if (built != 0) {
+  say("FAIL build: " + firstLine(buildErr));
+  System.exit(1);
+}
+
+let mixed = "1:1: operator + is not defined for I32 and Bytes [E0500]";
+rejects("demo", dir + "/mixed.jello", dir + "/mixed.jello:" + mixed);
+let typeerr = "1:14: n is annotated I32, but its value is Bytes [E0400]";
+rejects("break it", dir + "/typeerr.jello", dir + "/typeerr.jello:" + typeerr);
+
+// Each comparison once true and once false, with the boundary where the operands are equal.
+let comparisons = [
+  ("2 < 3", "true"), ("3 < 3", "false"), ("3 <= 3", "true"), ("4 <= 3", "false"),
+  ("4 > 3", "true"), ("3 > 3", "false"), ("3 >= 3", "true"), ("2 >= 3", "false"),
+  ("3 == 3", "true"), ("2 == 3", "false"), ("2 != 3", "true"), ("3 != 3", "false"),
+];
+
+for (comparison in comparisons) {
+  let (expression, want) = comparison;
+  let first = expression.slice(0, 1);
+  let others = expression.slice(1, expression.len() - 1);
+  prints(expression, "let a = " + first + ";\na" + others, want + "\n");
+}
+
+// Constructs the checker accepts but the emitter does not build yet, each located.
+let logical = "let a = 1;\nlet b = (a < 2) && true;";
+notYet("&&", logical, "build/not-yet.jello:2:9: not supported yet: logical operator\n"
+  + "let b = (a < 2) && true;\n        ^\n");
+notYet("Bool ==", "true == false", "build/not-yet.jello:1:1: not supported yet: Bool equality\n"
+  + "true == false\n^\n");
+notYet("bytes", "let s = 1;\n\"a\"", "build/not-yet.jello:2:1: not supported yet: bytes literal\n"
+  + "\"a\"\n^\n");
+
+// 128 terms need 255 registers, which fit; 129 need 257, one more than a function can have.
+prints("128 terms", ones(128), "128\n");
+let wider = ones(129);
+let large = "build/not-yet.jello:1:1: not supported yet: large expression\n";
+notYet("129 terms", wider, large + wider + "\n^\n");
+
+let (corpus, out, err) = run(["jelloc", "run", "scripts/Corpus.jello", "7"], []);
+writeText("/dev/stdout", out + err);
+if (corpus != 0) { failed = true; }
+
+if (failed) {
+  say("some checks failed");
+  System.exit(1);
+}
+say("all checks ok");

@@ -1,0 +1,204 @@
+package frontend.syntax;
+
+/** @file The lexer, which turns source text into tokens, one byte at a time. */
+
+import type { Token, TokenKind } from frontend.syntax.Tokens;
+import { isKeyword, operators } from frontend.syntax.Tokens;
+import { errorAt, useSource } from frontend.syntax.Source;
+import { byteText, join } from support.Text;
+
+let _src = "";
+
+// Returns byte `i` of the source, or -1 if `i` is past either end.
+let _byte = fn(i: I32): I32 { ((i >= 0) && (i < _src.len())) ? _src.get(i) : -1 };
+
+let _isSpace = fn(c: I32): Bool { (c == " ".code) || ((c >= 9) && (c <= 13)) };
+
+let _isDigit = fn(c: I32): Bool { (c >= "0".code) && (c <= "9".code) };
+
+let _startsWord = fn(c: I32): Bool {
+  ((c >= "a".code) && (c <= "z".code)) || ((c >= "A".code) && (c <= "Z".code)) || (c == "_".code)
+};
+
+let _isWord = fn(c: I32): Bool { _startsWord(c) || _isDigit(c) };
+
+// Checks whether the source holds `text` at byte `i`.
+let _startsAt = fn(i: I32, text: Bytes): Bool {
+  (i + text.len() <= _src.len()) && (_src.slice(i, text.len()) == text)
+};
+
+// Checks whether byte `c` ends a line, counting -1, the end of the source, as one.
+let _endsLine = fn(c: I32): Bool { (c < 0) || (c == "\n".code) || (c == "\r".code) };
+
+// Returns how many bytes the UTF-8 character at byte `i` takes, stopping where it is cut short.
+let _charLength = fn(i: I32): I32 {
+  let c = _byte(i);
+  let length = (c >= 240) ? 4 : (c >= 224) ? 3 : (c >= 192) ? 2 : 1;
+  let n = 1;
+  while ((n < length) && (_byte(i + n) >= 128) && (_byte(i + n) < 192)) { n++; }
+  n
+};
+
+// Returns the value of hex digit `c`, or -1 if it is not one.
+let _hex = fn(c: I32): I32 {
+  if (_isDigit(c)) { return c - "0".code; }
+  if ((c >= "a".code) && (c <= "f".code)) { return c - "a".code + 10; }
+  if ((c >= "A".code) && (c <= "F".code)) { return c - "A".code + 10; }
+  -1
+};
+
+let _token = fn(kind: TokenKind, text: Bytes, start: I32, end: I32): Token {
+  { kind: kind, text: text, start: start, end: end }
+};
+
+// Returns where the next token starts: the first byte at or after `at` outside spaces and comments.
+let _skip = fn(at: I32): I32 {
+  let i = at;
+  let more = true;
+
+  while (more) {
+    let c = _byte(i);
+
+    if (_isSpace(c)) {
+      i++;
+    } else if ((c == "#".code) || _startsAt(i, "//")) {
+      while ((_byte(i) >= 0) && (_byte(i) != "\n".code)) { i++; }
+    } else if (_startsAt(i, "/*")) {
+      let open = i;
+      i += 2;
+
+      while (!_startsAt(i, "*/")) {
+        if (_byte(i) < 0) { throw errorAt(open, "E0005", "unterminated block comment"); }
+        i++;
+      }
+      i += 2;
+    } else {
+      more = false;
+    }
+  }
+  i
+};
+
+/* Checks whether the dot at byte `i` starts a member name, as in `16.le`, rather than making a
+ * float, as in `1.`, `1.e5` or `1.f32`. */
+let _startsMember = fn(i: I32): Bool {
+  let e = (_byte(i + 1) == "e".code) || (_byte(i + 1) == "E".code);
+  let signed = (_byte(i + 2) == "+".code) || (_byte(i + 2) == "-".code);
+  let exponent = e && _isDigit(_byte(signed ? i + 3 : i + 2));
+  let suffix = _startsAt(i + 1, "f16") || _startsAt(i + 1, "f32") || _startsAt(i + 1, "f64");
+  _startsWord(_byte(i + 1)) && !exponent && !suffix
+};
+
+/* Lexes the integer at byte `start`. Digits that run straight into a word byte, or into a dot that
+ * does not start a member name, are an error that quotes the whole run. */
+let _number = fn(start: I32): Token {
+  let i = start;
+  while (_isDigit(_byte(i))) { i++; }
+  let point = (_byte(i) == ".".code) && !_startsMember(i);
+
+  if (_isWord(_byte(i)) || point) {
+    if (point) { i++; }
+    while (_isWord(_byte(i)) || ((_byte(i) == ".".code) && _isWord(_byte(i + 1)))) { i++; }
+    throw errorAt(start, "E0003", "invalid constant: " + _src.slice(start, i - start));
+  }
+  _token(TokenKind.Int, _src.slice(start, i - start), start, i)
+};
+
+/* Decodes the escape at byte `i`, pushes the byte it stands for onto `parts`, and returns where
+ * the escape ends: a `\xHH` escape takes four bytes of source and every other escape takes two. */
+let _escape = fn(i: I32, parts: Array<Bytes>): I32 {
+  let c = _byte(i + 1);
+
+  if (c == "x".code) {
+    let high = _hex(_byte(i + 2));
+    let low = _hex(_byte(i + 3));
+    if ((high < 0) || (low < 0)) { throw errorAt(i, "E0004", "invalid hex escape"); }
+    parts.push(byteText(high * 16 + low));
+    return i + 4;
+  }
+
+  let value = match (c) {
+    "0".code => 0,
+    "a".code => 7,
+    "b".code => 8,
+    "t".code => 9,
+    "n".code => 10,
+    "v".code => 11,
+    "f".code => 12,
+    "r".code => 13,
+    "'".code, "\"".code, "\\".code, "`".code => c,
+    _ => -1,
+  };
+
+  if (value < 0) {
+    throw errorAt(i, "E0004", "unknown escape \\" + _src.slice(i + 1, _charLength(i + 1)));
+  }
+  parts.push(byteText(value));
+  i + 2
+};
+
+// Lexes the bytes literal whose opening quote is at byte `start`, decoding its escapes.
+let _bytes = fn(start: I32): Token {
+  let quote = _byte(start);
+  let parts: Array<Bytes> = [];
+  let i = start + 1;
+  let run = i;
+
+  while (_byte(i) != quote) {
+    let c = _byte(i);
+
+    if (_endsLine(c) || ((c == "\\".code) && _endsLine(_byte(i + 1)))) {
+      throw errorAt(start, "E0005", "unterminated bytes literal");
+    }
+
+    if (c == "\\".code) {
+      parts.push(_src.slice(run, i - run));
+      i = _escape(i, parts);
+      run = i;
+    } else {
+      i++;
+    }
+  }
+  parts.push(_src.slice(run, i - run));
+  _token(TokenKind.Bytes, join(parts), start, i + 1)
+};
+
+// Lexes the operator at byte `start`, taking the longest that matches.
+let _op = fn(start: I32): Token {
+  let i = 0;
+  while ((i < operators.len()) && !_startsAt(start, operators[i])) { i++; }
+  if (i == operators.len()) { throw errorAt(start, "E0002", "unexpected character"); }
+  _token(TokenKind.Op, operators[i], start, start + operators[i].len())
+};
+
+// Lexes the token that starts at byte `start`.
+let _next = fn(start: I32): Token {
+  let c = _byte(start);
+
+  if (_startsWord(c)) {
+    let i = start;
+    while (_isWord(_byte(i))) { i++; }
+    let word = _src.slice(start, i - start);
+    return _token(isKeyword(word) ? TokenKind.Keyword : TokenKind.Ident, word, start, i);
+  }
+  if (_isDigit(c)) { return _number(start); }
+  if ((c == "\"".code) || (c == "'".code)) { return _bytes(start); }
+  _op(start)
+};
+
+/* Returns the tokens of `text`, read from `path`, ending with `Eof`. Throws the diagnostic for the
+ * first bad one, and leaves `text` as the file that later diagnostics refer to. */
+export let lex = fn(path: Bytes, text: Bytes): Array<Token> {
+  useSource(path, text);
+  _src = text;
+  let tokens: Array<Token> = [];
+  let at = _skip(0);
+
+  while (at < text.len()) {
+    let token = _next(at);
+    tokens.push(token);
+    at = _skip(token.end);
+  }
+  tokens.push(_token(TokenKind.Eof, "", at, at));
+  tokens
+};

@@ -1,0 +1,2 @@
+// error: 2:9: unknown name: x [E0300]
+let x = x + 1;

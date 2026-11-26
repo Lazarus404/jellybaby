@@ -1,0 +1,2 @@
+// error: 2:1: && and || require Bool operands [E0500]
+true && 1

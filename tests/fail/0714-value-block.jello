@@ -1,0 +1,2 @@
+// error: 2:9: value block requires a trailing expression [E0410]
+let y = { let a = 1; };

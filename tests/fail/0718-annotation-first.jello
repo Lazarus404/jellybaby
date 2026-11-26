@@ -1,0 +1,2 @@
+// error: 2:8: unknown type: Foo [E0401]
+let x: Foo = y;

@@ -119,5 +119,17 @@ for (file in filesUnder("tests/fail", ".jello")) {
   report((got == want) && (theirs != 0) && (wanted == want), "fail", file, got + " / " + wanted);
 }
 
+if (chapterNumber >= 7) {
+  for (file in filesUnder("tests/hir", ".jello")) {
+    if (chapterOf(file) > chapterNumber) { continue; }
+    let base = file.slice(0, file.len() - 6);
+    let (status, out, err) = ours(file, "--hir");
+    let (theirs, theirOut, theirErr) = run(["jelloc", file, "--hir"], []);
+    let want = readText(base + ".hir");
+    report((status == 0) && (theirs == 0) && (out == want) && (theirOut == want), "hir", file,
+      line(err + theirErr));
+  }
+}
+
 say("corpus: " + Std.string(passed) + " passed, " + Std.string(failed) + " failed");
 System.exit(failed == 0 ? 0 : 1);

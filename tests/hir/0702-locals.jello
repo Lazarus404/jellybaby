@@ -1,0 +1,9 @@
+let x = {
+  let a = 1;
+  a
+};
+let y = {
+  let b = 2;
+  b
+};
+x + y

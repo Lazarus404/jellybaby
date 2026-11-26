@@ -1,0 +1,93 @@
+/** @file The command line: compile a file, or print its tokens, parse result or syntax tree. */
+
+import { readFile, writeFile, stdout, stderr, argCount, arg, exit } from support.Os;
+import { lex } from frontend.syntax.Lexer;
+import { printTokens } from frontend.syntax.Tokens;
+import { parse } from frontend.syntax.Parser;
+import { printProgram } from frontend.syntax.PrintAst;
+import { check } from frontend.semantics.TypeCheck;
+import { printHir } from frontend.hir.Print;
+import { emit } from backend.jello.Emit;
+
+// Reports a bad command line and returns exit status 2.
+let _badUsage = fn(reason: Bytes): I32 {
+  let usage = "usage: jellybaby input.jello [--lex|--parse|--ast|--hir|--out PATH]\n";
+  stderr("jellybaby: " + reason + "\n" + usage);
+  2
+};
+
+// Runs the command line and returns the exit status.
+let _main = fn(): I32 {
+  let input: ?Bytes = null;
+  let mode: ?Bytes = null;
+  let output: ?Bytes = null;
+  let i = 0;
+
+  while (i < argCount()) {
+    let word = arg(i);
+
+    if ((word == "--lex") || (word == "--parse") || (word == "--ast") || (word == "--hir")) {
+      if ((mode != null) || (output != null)) { return _badUsage("more than one mode"); }
+      mode = word;
+    } else if (word == "--out") {
+      if ((mode != null) || (output != null)) { return _badUsage("more than one mode"); }
+      i++;
+      if (i == argCount()) { return _badUsage("output path required"); }
+      output = arg(i);
+    } else if ((word.len() > 0) && (word.get(0) == "-".code)) {
+      return _badUsage("unknown option: " + word);
+    } else if (input == null) {
+      input = word;
+    } else {
+      return _badUsage("unexpected argument: " + word);
+    }
+    i++;
+  }
+  if (input == null) { return _badUsage("missing input"); }
+
+  let text = readFile(input);
+
+  if (text == null) {
+    stderr("jellybaby: cannot read " + input + "\n");
+    return 1;
+  }
+  // `--parse` labels a failure with the stage that found it.
+  let stage = "LEXER\t";
+
+  try {
+    let tokens = lex(input, text);
+
+    if (mode == "--lex") {
+      stdout(printTokens(tokens));
+      return 0;
+    }
+    stage = "PARSER\t";
+    let program = parse(tokens);
+    if (mode == "--parse") { return 0; }
+
+    if (mode == "--ast") {
+      stdout(printProgram(program));
+      return 0;
+    }
+    let hir = check(program);
+
+    if (mode == "--hir") {
+      stdout(printHir(hir));
+      return 0;
+    }
+    let module = emit(hir);
+
+    if (output == null) {
+      stdout(module);
+    } else if (!writeFile(output, module)) {
+      stderr("jellybaby: cannot write " + output + "\n");
+      return 1;
+    }
+  } catch (e) {
+    stderr(((mode == "--parse") ? stage : "") + (e as Bytes) + "\n");
+    return 1;
+  }
+  0
+};
+
+exit(_main());

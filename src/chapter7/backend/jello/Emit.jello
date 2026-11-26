@@ -1,0 +1,166 @@
+package backend.jello;
+
+/** @file Writes a text JLO module for a checked program. */
+
+import type { HirExpr, HirProgram, HirStmt } from frontend.hir.Hir;
+import { typeOf } from frontend.hir.Hir;
+import type { Type } from frontend.semantics.Types;
+import { Type } from frontend.semantics.Types;
+import { errorAt } from frontend.syntax.Source;
+import { indexOf, intText, join } from support.Text;
+
+let _types: Array<Bytes> = [];
+let _regTypes: Array<Bytes> = [];
+let _code: Array<Bytes> = [];
+let _globalRegs: Array<I32> = [];
+let _localRegs: Array<I32> = [];
+
+// Stops at a construct not built yet; the I32 result lets it stand where a register is expected.
+let _unsupported = fn(at: I32, construct: Bytes): I32 {
+  throw errorAt(at, "", "not supported yet: " + construct);
+  0
+};
+
+let _vmType = fn(ty: Type): Bytes { match (ty) {
+  I32 => "I32", Bool => "BOOL", _ => "DYNAMIC",
+} };
+
+// Adds a register of type `ty` for the node at `at`, interning the type.
+let _reg = fn(at: I32, ty: Type): I32 {
+  if (_regTypes.len() == 256) { return _unsupported(at, "large expression"); }
+  let name = _vmType(ty);
+  if (indexOf(_types, name) < 0) { _types.push(name); }
+  _regTypes.push(name);
+  _regTypes.len() - 1
+};
+
+let _insn = fn(op: Bytes, a: I32, b: I32, c: I32, imm: I32): Void {
+  _code.push("  " + intText(_code.len()) + ": " + op + " a=r" + intText(a) + " b=r"
+    + intText(b) + " c=r" + intText(c) + " imm=" + intText(imm) + "\n");
+};
+
+let _list = fn(items: Array<Bytes>): Bytes {
+  let parts: Array<Bytes> = [];
+  let i = 0;
+
+  while (i < items.len()) {
+    if (i > 0) { parts.push(", "); }
+    parts.push(items[i]);
+    i++;
+  }
+  join(parts)
+};
+
+// Copies `source` into a new register, so that a later assignment cannot change the copy.
+let _copy = fn(at: I32, source: I32, ty: Type): I32 {
+  let out = _reg(at, ty);
+  _insn("MOV", out, source, 0, 0);
+  out
+};
+
+// Emits one instruction with no operands that loads `imm` into a new register of type `ty`.
+let _constant = fn(at: I32, op: Bytes, ty: Type, imm: I32): I32 {
+  let out = _reg(at, ty);
+  _insn(op, out, 0, 0, imm);
+  out
+};
+
+let _statements = fn(statements: Array<HirStmt>): Void {
+  let i = 0;
+
+  while (i < statements.len()) {
+    _stmt(statements[i]);
+    i++;
+  }
+};
+
+let _expr = fn(expr: HirExpr): I32 { match (expr) {
+  Int(at, value) => _constant(at, "CONST_I32", Type.I32, value),
+  Bool(at, value) => _constant(at, "CONST_BOOL", Type.Bool, value ? 1 : 0),
+  Null(at) => _constant(at, "CONST_NULL", Type.Null, 0),
+  Bytes(at, _) => _unsupported(at, "bytes literal"),
+  Local(at, id, ty) => _copy(at, _localRegs[id], ty),
+  Global(at, id, ty) => _copy(at, _globalRegs[id], ty),
+  Assign(_, id, value) => {
+    let source = _expr(value);
+    _insn("MOV", _localRegs[id], source, 0, 0);
+    source
+  },
+  SetGlobal(_, id, value) => {
+    let source = _expr(value);
+    _insn("MOV", _globalRegs[id], source, 0, 0);
+    source
+  },
+  Unary(at, op, operand) => {
+    let source = _expr(operand);
+    let out = _reg(at, typeOf(expr));
+    _insn(match (op) { Neg => "NEG_I32", _ => "NOT_BOOL" }, out, source, 0, 0);
+    out
+  },
+  Binary(at, op, left, right) => {
+    let name = match (op) {
+      Add => "ADD_I32", Sub => "SUB_I32", Mul => "MUL_I32", Div => "DIV_I32", Rem => "MOD_I32",
+      Eq => match (typeOf(left)) { I32 => "EQ_I32", _ => "" },
+      Lt, Gt => "LT_I32",
+      _ => "",
+    };
+
+    if (name == "") {
+      let construct = match (op) {
+        And, Or => "logical operator",
+        Eq => "Bool equality",
+        _ => "bytes operation",
+      };
+      return _unsupported(at, construct);
+    }
+    let a = _expr(left);
+    let b = _expr(right);
+    let swapped = match (op) { Gt => true, _ => false };
+    let out = _reg(at, typeOf(expr));
+    _insn(name, out, swapped ? b : a, swapped ? a : b, 0);
+    out
+  },
+  Block(_, statements, tail) => {
+    _statements(statements);
+    _expr(tail)
+  },
+} };
+
+// Gives a new binding a register of its own, holding its first value.
+let _bind = fn(at: I32, regs: Array<I32>, value: HirExpr): Void {
+  let source = _expr(value);
+  let target = _reg(at, typeOf(value));
+  regs.push(target);
+  _insn("MOV", target, source, 0, 0);
+};
+
+let _stmt = fn(stmt: HirStmt): Void { match (stmt) {
+  Global(at, _, _, value) => _bind(at, _globalRegs, value),
+  Let(at, _, _, _, value) => _bind(at, _localRegs, value),
+  Expression(value) => {
+    _expr(value);
+    return;
+  },
+  Block(statements) => _statements(statements),
+} };
+
+// Emits a complete module, or throws at the first construct not built yet.
+export let emit = fn(program: HirProgram): Bytes {
+  _types = [];
+  _regTypes = [];
+  _code = [];
+  _globalRegs = [];
+  _localRegs = [];
+  _statements(program.statements);
+  _insn("RET", _expr(program.tail), 0, 0, 0);
+  join([
+    ".jlo module version=1 features=[] entry=0\n",
+    "types: [" + _list(_types) + "]\n",
+    "sigs: []\n",
+    "atoms: []\n",
+    "struct_sigs: []\n",
+    "func[0] nregs=" + intText(_regTypes.len()) + " nargs=0 reg_types=[" + _list(_regTypes)
+    + "]\n",
+    join(_code),
+  ])
+};

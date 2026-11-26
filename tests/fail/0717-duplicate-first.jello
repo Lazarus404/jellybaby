@@ -1,0 +1,5 @@
+// error: 4:3: duplicate local: a [E0302]
+{
+  let a = 1;
+  let a = b;
+};

@@ -1,0 +1,5 @@
+program
+  global g0 a: i32
+    i32 -2147483648: i32
+  neg.wrap: i32
+    i32 -5: i32

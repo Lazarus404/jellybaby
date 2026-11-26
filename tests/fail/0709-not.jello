@@ -1,0 +1,2 @@
+// error: 2:1: operator ! requires a Bool operand, not I32 [E0500]
+!1
