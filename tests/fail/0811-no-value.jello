@@ -1,0 +1,4 @@
+// error: 3:7: cannot infer the type of v; annotate it as Null<T> [E0403]
+while (true) {
+  let v = if (true) { break; } else { continue; };
+}

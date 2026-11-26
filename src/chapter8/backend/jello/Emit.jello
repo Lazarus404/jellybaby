@@ -1,0 +1,127 @@
+package backend.jello;
+
+/** @file Writes a text JLO module from the basic-block IR. */
+
+import type { End, Function, Insn, IrOp } from ir.Model;
+import type { Type } from frontend.semantics.Types;
+import { indexOf, intText, join } from support.Text;
+
+let _types: Array<Bytes> = [];
+let _regTypes: Array<Bytes> = [];
+let _code: Array<Bytes> = [];
+let _starts: Array<I32> = [];
+
+let _vmType = fn(ty: Type): Bytes { match (ty) {
+  I32 => "I32", Bool => "BOOL", _ => "DYNAMIC",
+} };
+
+let _list = fn(items: Array<Bytes>): Bytes {
+  let parts: Array<Bytes> = [];
+  let i = 0;
+
+  while (i < items.len()) {
+    if (i > 0) { parts.push(", "); }
+    parts.push(items[i]);
+    i++;
+  }
+  join(parts)
+};
+
+let _line = fn(op: Bytes, a: I32, b: I32, c: I32, imm: I32): Void {
+  _code.push("  " + intText(_code.len()) + ": " + op + " a=r" + intText(a) + " b=r"
+    + intText(b) + " c=r" + intText(c) + " imm=" + intText(imm) + "\n");
+};
+
+let _next = fn(function: Function, order: I32, target: I32): Bool {
+  (order + 1 < function.order.len()) && (function.order[order + 1] == target)
+};
+
+let _endSize = fn(function: Function, order: I32, end: End): I32 { match (end) {
+  Return(_, _) => 1,
+  Jump(_, target) => _next(function, order, target) ? 0 : 1,
+  Branch(_, _, _, otherwise) => _next(function, order, otherwise) ? 1 : 2,
+} };
+
+let _jump = fn(op: Bytes, condition: I32, target: I32): Void {
+  let pc = _code.len();
+  _line(op, condition, 0, 0, _starts[target] - (pc + 1));
+};
+
+let _op = fn(op: IrOp): Bytes { match (op) {
+  Add => "ADD_I32", Sub => "SUB_I32", Mul => "MUL_I32", Div => "DIV_I32", Rem => "MOD_I32",
+  Neg => "NEG_I32", Not => "NOT_BOOL", Eq => "EQ_I32", Lt => "LT_I32",
+} };
+
+let _insn = fn(insn: Insn): Void { match (insn) {
+  Const(_, dst, ty, value) => _line(match (ty) {
+    I32 => "CONST_I32", Bool => "CONST_BOOL", _ => "CONST_NULL",
+  }, dst, 0, 0, value),
+  Move(_, dst, src) => _line("MOV", dst, src, 0, 0),
+  Unary(_, op, dst, src) => _line(_op(op), dst, src, 0, 0),
+  Binary(_, op, dst, left, right) => _line(_op(op), dst, left, right, 0),
+} };
+
+export let emit = fn(function: Function): Bytes {
+  _types = [];
+  _regTypes = [];
+  _code = [];
+  _starts = [];
+  let i = 0;
+
+  while (i < function.blocks.len()) {
+    _starts.push(0);
+    i++;
+  }
+  i = 0;
+  let pc = 0;
+
+  while (i < function.order.len()) {
+    let id = function.order[i];
+    let block = function.blocks[id];
+    _starts[id] = pc;
+    pc += block.insns.len();
+    if (block.end != null) { pc += _endSize(function, i, block.end); }
+    i++;
+  }
+  i = 0;
+
+  while (i < function.regs.len()) {
+    let name = _vmType(function.regs[i]);
+    if (indexOf(_types, name) < 0) { _types.push(name); }
+    _regTypes.push(name);
+    i++;
+  }
+  i = 0;
+
+  while (i < function.order.len()) {
+    let block = function.blocks[function.order[i]];
+    let j = 0;
+
+    while (j < block.insns.len()) {
+      _insn(block.insns[j]);
+      j++;
+    }
+
+    if (block.end != null) {
+      match (block.end) {
+        Return(_, value) => _line("RET", value, 0, 0, 0),
+        Jump(_, target) => { if (!_next(function, i, target)) { _jump("JMP", 0, target); } },
+        Branch(_, condition, then, otherwise) => {
+          _jump("JMP_IF", condition, then);
+          if (!_next(function, i, otherwise)) { _jump("JMP", 0, otherwise); }
+        },
+      };
+    }
+    i++;
+  }
+  join([
+    ".jlo module version=1 features=[] entry=0\n",
+    "types: [" + _list(_types) + "]\n",
+    "sigs: []\n",
+    "atoms: []\n",
+    "struct_sigs: []\n",
+    "func[0] nregs=" + intText(_regTypes.len()) + " nargs=0 reg_types=[" + _list(_regTypes)
+    + "]\n",
+    join(_code),
+  ])
+};

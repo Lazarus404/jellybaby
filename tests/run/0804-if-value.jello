@@ -1,0 +1,5 @@
+let a = if (true) { 10 } else { 20 };
+let b = false ? 1 : 2;
+let n = 3;
+let c = if (n < 2) { 100 } else if (n < 4) { 30 } else { 400 };
+a + b + c

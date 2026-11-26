@@ -1,0 +1,9 @@
+let a = 1071;
+let b = 462;
+
+while (b != 0) {
+  let next = a % b;
+  a = b;
+  b = next;
+}
+a

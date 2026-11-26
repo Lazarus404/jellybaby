@@ -1,0 +1,4 @@
+// error: 3:11: cannot compare Null with I32 [E0500]
+while (true) {
+  let b = { break; 1 } == 1;
+}

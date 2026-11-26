@@ -1,0 +1,88 @@
+package frontend.hir;
+
+/** @file The typed tree that the checker builds and the printer and emitter read. */
+
+import type { Type } from frontend.semantics.Types;
+
+export enum HirOp {
+  Add; Sub; Mul; Div; Rem; Neg; Not; And; Or; Eq; Lt; Gt; BytesEq; BytesConcat;
+}
+
+// Every node keeps the source position `at` of the code it came from, for the emitter's errors.
+export enum HirExpr {
+  Int(at: I32, value: I32);
+  Bool(at: I32, value: Bool);
+  Bytes(at: I32, value: Bytes);
+  Null(at: I32);
+  Local(at: I32, id: I32, ty: Type);
+  Global(at: I32, id: I32, ty: Type);
+  Assign(at: I32, id: I32, value: HirExpr);
+  SetGlobal(at: I32, id: I32, value: HirExpr);
+  Unary(at: I32, op: HirOp, operand: HirExpr);
+  Binary(at: I32, op: HirOp, left: HirExpr, right: HirExpr);
+  // A block whose statements end every path has no tail, and takes its type from its context.
+  Block(at: I32, statements: Array<HirStmt>, tail: ?HirExpr, ty: Type);
+  If(at: I32, condition: HirExpr, then: HirExpr, otherwise: HirExpr, ty: Type);
+}
+
+export enum HirStmt {
+  Global(at: I32, id: I32, name: Bytes, value: HirExpr);
+  Let(at: I32, id: I32, name: Bytes, isConst: Bool, value: HirExpr);
+  Expression(value: HirExpr);
+  Block(statements: Array<HirStmt>);
+  If(at: I32, condition: HirExpr, then: Array<HirStmt>, otherwise: ?Array<HirStmt>);
+  // `breaks` says whether a `break` leaves the loop.
+  While(at: I32, condition: HirExpr, body: Array<HirStmt>, breaks: Bool);
+  Break(at: I32);
+  Continue(at: I32);
+}
+
+export typedef HirProgram = {
+  let statements: Array<HirStmt>;
+  let tail: HirExpr;
+};
+
+export let typeOf = fn(expr: HirExpr): Type { match (expr) {
+  Int(_, _) => Type.I32,
+  Bool(_, _) => Type.Bool,
+  Bytes(_, _) => Type.Bytes,
+  Null(_) => Type.Null,
+  Local(_, _, ty), Global(_, _, ty) => ty,
+  Assign(_, _, value), SetGlobal(_, _, value) => typeOf(value),
+  Unary(_, op, _) => match (op) { Not => Type.Bool, _ => Type.I32 },
+  Binary(_, op, _, _) => match (op) {
+    And, Or, Eq, Lt, Gt, BytesEq => Type.Bool,
+    BytesConcat => Type.Bytes,
+    _ => Type.I32,
+  },
+  Block(_, _, _, ty), If(_, _, _, _, ty) => ty,
+} };
+
+// Returns the source position of `expr`.
+export let atOf = fn(expr: HirExpr): I32 { match (expr) {
+  Int(at, _), Bool(at, _), Bytes(at, _), Null(at), Local(at, _, _), Global(at, _, _),
+  Assign(at, _, _), SetGlobal(at, _, _), Unary(at, _, _), Binary(at, _, _, _), Block(at, _, _, _),
+  If(at, _, _, _, _) => at,
+} };
+
+// Whether `expr` is the literal `true`, as in `while (true)`.
+export let isTrue = fn(expr: HirExpr): Bool { match (expr) {
+  Bool(_, value) => value,
+  _ => false,
+} };
+
+// Whether the last of `statements` ends every path through them.
+export let ends = fn(statements: Array<HirStmt>): Bool {
+  (statements.len() > 0) && endsPath(statements[statements.len() - 1])
+};
+
+/* Whether `stmt` ends every path through it, so nothing after it runs: a `break`, a `continue`,
+ * an `if` whose two branches both end, a block that ends, or a `while (true)` that no `break`
+ * leaves. */
+export let endsPath = fn(stmt: HirStmt): Bool { match (stmt) {
+  Break(_), Continue(_) => true,
+  If(_, _, then, otherwise) => (otherwise != null) && ends(then) && ends(otherwise),
+  Block(statements) => ends(statements),
+  While(_, condition, _, breaks) => isTrue(condition) && !breaks,
+  _ => false,
+} };

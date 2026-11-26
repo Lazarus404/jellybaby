@@ -1,0 +1,113 @@
+package frontend.syntax;
+
+/** @file The untyped syntax tree produced by the parser. */
+
+export enum Expr {
+  Int(at: I32, digits: Bytes);
+  Bytes(at: I32, value: Bytes);
+  Bool(at: I32, value: Bool);
+  Null(at: I32);
+  Name(at: I32, name: Bytes);
+  Unary(at: I32, op: Bytes, operand: Expr);
+  Binary(at: I32, op: Bytes, left: Expr, right: Expr);
+  Assign(at: I32, op: Bytes, target: Expr, value: Expr);
+  Step(at: I32, op: Bytes, prefix: Bool, target: Expr);
+  Conditional(at: I32, condition: Expr, then: Expr, otherwise: Expr);
+  Coalesce(at: I32, left: Expr, right: Expr);
+  Cast(at: I32, value: Expr, ty: TypeExpr);
+  Call(at: I32, callee: Expr, args: Array<Expr>);
+  Member(at: I32, object: Expr, name: Bytes);
+  Index(at: I32, object: Expr, index: Expr);
+  Function(at: I32, params: Array<Param>, result: ?TypeExpr, body: Block);
+  If(at: I32, condition: Expr, then: Block, otherwise: ?Expr);
+  Match(at: I32, subject: Expr, arms: Array<Arm>);
+  Try(at: I32, body: Block, name: ?Bytes, handler: Block);
+  BlockExpr(at: I32, block: Block);
+  ArrayLit(at: I32, items: Array<Expr>);
+  RecordLit(at: I32, fields: Array<FieldValue>);
+}
+
+export enum Stmt {
+  Let(at: I32, isConst: Bool, exported: Bool, nameAt: I32, name: Bytes, ty: ?TypeExpr, value: Expr);
+  Expression(at: I32, value: Expr);
+  While(at: I32, condition: Expr, body: Block);
+  Break(at: I32);
+  Continue(at: I32);
+  Return(at: I32, value: ?Expr);
+  Throw(at: I32, value: Expr);
+  Record(at: I32, exported: Bool, name: Bytes, fields: Array<Field>);
+  Enum(at: I32, exported: Bool, name: Bytes, variants: Array<Variant>);
+  Import(at: I32, typeOnly: Bool, names: Array<Bytes>, path: Bytes);
+  Load(at: I32, names: Array<Bytes>, library: Bytes);
+}
+
+export enum TypeExpr {
+  Named(at: I32, name: Bytes);
+  Generic(at: I32, name: Bytes, args: Array<TypeExpr>);
+  Optional(at: I32, inner: TypeExpr);
+  Function(at: I32, params: Array<TypeExpr>, result: TypeExpr);
+}
+
+export enum Pattern {
+  Wildcard(at: I32);
+  Bind(at: I32, name: Bytes);
+  Variant(at: I32, name: Bytes, fields: Array<Pattern>);
+  Int(at: I32, digits: Bytes);
+}
+
+export typedef Block = {
+  let at: I32;
+  let statements: Array<Stmt>;
+  let tail: ?Expr;
+};
+
+export typedef Param = {
+  let at: I32;
+  let name: Bytes;
+  let ty: ?TypeExpr;
+};
+
+export typedef Arm = {
+  let at: I32;
+  let patterns: Array<Pattern>;
+  let body: Block;
+};
+
+export typedef FieldValue = {
+  let at: I32;
+  let name: Bytes;
+  let value: Expr;
+};
+
+export typedef Field = {
+  let at: I32;
+  let name: Bytes;
+  let ty: TypeExpr;
+};
+
+export typedef Variant = {
+  let at: I32;
+  let name: Bytes;
+  let fields: Array<Field>;
+};
+
+export typedef Program = {
+  let packageName: ?Bytes;
+  let block: Block;
+};
+
+// Returns the source position of `expr`.
+export let exprAt = fn(expr: Expr): I32 { match (expr) {
+  Int(at, _), Bytes(at, _), Bool(at, _), Null(at), Name(at, _), Unary(at, _, _),
+  Binary(at, _, _, _), Assign(at, _, _, _), Step(at, _, _, _), Conditional(at, _, _, _),
+  Coalesce(at, _, _), Cast(at, _, _), Call(at, _, _), Member(at, _, _), Index(at, _, _),
+  Function(at, _, _, _), If(at, _, _, _), Match(at, _, _), Try(at, _, _, _), BlockExpr(at, _),
+  ArrayLit(at, _), RecordLit(at, _) => at,
+} };
+
+// Returns the source position of `stmt`.
+export let stmtAt = fn(stmt: Stmt): I32 { match (stmt) {
+  Let(at, _, _, _, _, _, _), Expression(at, _), While(at, _, _), Break(at), Continue(at),
+  Return(at, _), Throw(at, _), Record(at, _, _, _), Enum(at, _, _, _), Import(at, _, _, _),
+  Load(at, _, _) => at,
+} };

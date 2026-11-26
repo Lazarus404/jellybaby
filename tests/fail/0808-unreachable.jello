@@ -1,0 +1,5 @@
+// error: 4:3: unreachable statement [E0701]
+while (true) {
+  break;
+  let x = 1;
+}

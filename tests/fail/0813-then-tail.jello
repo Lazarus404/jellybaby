@@ -1,0 +1,2 @@
+// error: 2:20: value block requires a trailing expression [E0410]
+let x = if (1 < 2) { } else { 3 };

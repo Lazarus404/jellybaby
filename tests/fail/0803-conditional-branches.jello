@@ -1,0 +1,2 @@
+// error: 2:12: if branches must have the same type, not I32 and Bool [E0400]
+true ? 1 : false

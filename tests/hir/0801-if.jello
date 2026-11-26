@@ -1,0 +1,5 @@
+let c = true;
+let a = if (c) { 1 } else { 2 };
+if (c) { 3 } else if (false) { 4 } else { 5 }
+if (c) { 6 }
+a

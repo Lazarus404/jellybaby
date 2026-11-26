@@ -1,0 +1,5 @@
+let least = -2147483648;
+let divisor = -1;
+let quotient = least / divisor;
+let remainder = least % divisor;
+quotient + remainder

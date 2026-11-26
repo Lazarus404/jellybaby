@@ -1,0 +1,644 @@
+package frontend.syntax;
+
+/** @file The parser, which turns tokens into a syntax tree by recursive descent. */
+
+import type { Token, TokenKind } from frontend.syntax.Tokens;
+import type {
+  Expr, Stmt, TypeExpr, Pattern, Block, Param, Arm, FieldValue, Field, Variant, Program
+} from frontend.syntax.Ast;
+import { exprAt } from frontend.syntax.Ast;
+import { errorAt } from frontend.syntax.Source;
+import { escape, indexOf, intText } from support.Text;
+
+let _tokens: Array<Token> = [];
+let _pos = 0;
+
+// The token that errors point at: the one looked at last.
+let _seen = 0;
+
+// The keywords that start a statement.
+let _statementWords = [
+  "let", "export", "const", "typedef", "enum", "import", "load", "while", "break", "continue",
+  "throw", "return",
+];
+
+// The binary operators, and how tightly each binds.
+let _binaryOps = [
+  "*", "/", "%", "+", "-", "<", "<=", ">", ">=", "==", "!=", "&&", "||", "??", "?", "=", "+=",
+  "-=", "*=", "/=", "%=",
+];
+let _precedences = [80, 80, 80, 70, 70, 50, 50, 50, 50, 45, 45, 25, 20, 17, 15, 5, 5, 5, 5, 5, 5];
+
+// Returns the next token without reading it.
+let _peek = fn(): Token {
+  _seen = _pos;
+  _tokens[_pos]
+};
+
+// Reads the next token.
+let _next = fn(): Token {
+  let token = _peek();
+  _pos++;
+  token
+};
+
+let _isWordToken = fn(token: Token): Bool {
+  match (token.kind) { Keyword, Op => true, _ => false }
+};
+
+// Checks whether the next token is the keyword or operator `text`.
+let _at = fn(text: Bytes): Bool {
+  let token = _peek();
+  (token.text == text) && _isWordToken(token)
+};
+
+// Checks whether the next token is `end`, or the end of the file, which ends every block.
+let _atEnd = fn(end: Bytes): Bool {
+  let eof = match (_peek().kind) { Eof => true, _ => false };
+  eof || _at(end)
+};
+
+// Reads the next token if it is the keyword or operator `text`, and says whether it was.
+let _accept = fn(text: Bytes): Bool {
+  if (!_at(text)) { return false; }
+  _next();
+  true
+};
+
+/* Checks whether another item of a list separated by commas follows, before `end`; `count` items
+ * have been read, so every item after the first reads the comma before it. */
+let _more = fn(count: I32, end: Bytes): Bool {
+  !_at(end) && ((count == 0) || (_accept(",") && !_at(end)))
+};
+
+// Returns the error `message`, with `code`, at the token looked at last.
+let _error = fn(code: Bytes, message: Bytes): Bytes {
+  errorAt(_tokens[_seen].start, code, "ParseError: " + message)
+};
+
+// Returns the error for finding `token` where `what` should be.
+let _expected = fn(what: Bytes, token: Token): Bytes {
+  let found = match (token.kind) {
+    Eof => "the end of the file",
+    Bytes => escape(token.text),
+    _ => "'" + token.text + "'",
+  };
+  _error("E0100", "expected " + what + ", found " + found)
+};
+
+// Reads the keyword or operator `text`.
+let _expect = fn(text: Bytes): Void {
+  let token = _next();
+  if (!_isWordToken(token) || (token.text != text)) { throw _expected("'" + text + "'", token); }
+};
+
+// Reads an identifier, or a keyword too when `keywords` is true; `what` names it in an error.
+let _word = fn(what: Bytes, keywords: Bool): Bytes {
+  let token = _next();
+  let ok = match (token.kind) { Ident => true, Keyword => keywords, _ => false };
+  if (!ok) { throw _expected(what, token); }
+  token.text
+};
+
+let _ident = fn(): Bytes { _word("identifier", false) };
+
+// Returns `expr` at position `at`, which a parenthesised expression takes from its `(`.
+let _movedTo = fn(expr: Expr, at: I32): Expr {
+  match (expr) {
+    Int(_, digits) => Expr.Int(at, digits),
+    Bytes(_, value) => Expr.Bytes(at, value),
+    Bool(_, value) => Expr.Bool(at, value),
+    Null(_) => Expr.Null(at),
+    Name(_, name) => Expr.Name(at, name),
+    Unary(_, op, operand) => Expr.Unary(at, op, operand),
+    Binary(_, op, left, right) => Expr.Binary(at, op, left, right),
+    Assign(_, op, target, value) => Expr.Assign(at, op, target, value),
+    Step(_, op, prefix, target) => Expr.Step(at, op, prefix, target),
+    Conditional(_, condition, then, otherwise) => Expr.Conditional(at, condition, then, otherwise),
+    Coalesce(_, left, right) => Expr.Coalesce(at, left, right),
+    Cast(_, value, ty) => Expr.Cast(at, value, ty),
+    Call(_, callee, args) => Expr.Call(at, callee, args),
+    Member(_, object, name) => Expr.Member(at, object, name),
+    Index(_, object, index) => Expr.Index(at, object, index),
+    Function(_, params, result, body) => Expr.Function(at, params, result, body),
+    If(_, condition, then, otherwise) => Expr.If(at, condition, then, otherwise),
+    Match(_, subject, arms) => Expr.Match(at, subject, arms),
+    Try(_, body, name, handler) => Expr.Try(at, body, name, handler),
+    BlockExpr(_, block) => Expr.BlockExpr(at, block),
+    ArrayLit(_, items) => Expr.ArrayLit(at, items),
+    RecordLit(_, fields) => Expr.RecordLit(at, fields),
+  }
+};
+
+let _assignable = fn(expr: Expr): Bool {
+  match (expr) { Name(_, _), Member(_, _, _), Index(_, _, _) => true, _ => false }
+};
+
+/* Reads the `>` that closes a type's arguments. A `>>`, `>=` or `>>=` starts with one, and the
+ * rest of it takes its place as the next token, so `Array<Array<I32>>` closes twice. */
+let _closeArguments = fn(): Void {
+  let token = _peek();
+  let text = token.text;
+  if (!_isWordToken(token) || (text.get(0) != ">".code)) { throw _expected("'>'", token); }
+
+  if (text == ">") {
+    _pos++;
+  } else {
+    let rest = text.slice(1, text.len() - 1);
+    _tokens[_pos] = { kind: TokenKind.Op, text: rest, start: token.start, end: token.end };
+  }
+};
+
+// Reads a type: `?T`, `(A, B) -> R`, `Name` or `Name<T, ...>`.
+let _type = fn(): TypeExpr {
+  let at = _peek().start;
+  if (_accept("?")) { return TypeExpr.Optional(at, _type()); }
+
+  if (_accept("(")) {
+    let params: Array<TypeExpr> = [];
+    while (_more(params.len(), ")")) { params.push(_type()); }
+    _expect(")");
+    if (_accept("->")) { return TypeExpr.Function(at, params, _type()); }
+    if (params.len() != 1) { throw _expected("'->'", _peek()); }
+    return params[0];
+  }
+  let name = _word("type name", false);
+  let left = TypeExpr.Named(at, name);
+
+  if (_accept("<")) {
+    let args = [_type()];
+    while (_accept(",")) { args.push(_type()); }
+    _closeArguments();
+    left = TypeExpr.Generic(at, name, args);
+  }
+  _accept("->") ? TypeExpr.Function(at, [left], _type()) : left
+};
+
+let _optionalType = fn(): ?TypeExpr {
+  if (!_accept(":")) { return null; }
+  _type()
+};
+
+// Reads expressions separated by commas, up to and including `end`.
+let _exprList = fn(end: Bytes): Array<Expr> {
+  let out: Array<Expr> = [];
+  while (_more(out.len(), end)) { out.push(_expr(0)); }
+  _expect(end);
+  out
+};
+
+let _params = fn(): Array<Param> {
+  _expect("(");
+  let out: Array<Param> = [];
+
+  while (_more(out.len(), ")")) {
+    out.push({ at: _peek().start, name: _ident(), ty: _optionalType() });
+  }
+  _expect(")");
+  out
+};
+
+// Reads a dotted module path, such as `support.Text`.
+let _path = fn(): Bytes {
+  let out = _ident();
+  while (_accept(".")) { out = out + "." + _ident(); }
+  out
+};
+
+// Reads `( expr )`.
+let _parenthesised = fn(): Expr {
+  _expect("(");
+  let condition = _expr(0);
+  _expect(")");
+  condition
+};
+
+/* Reads a record literal. A field without a value, as in `{ x }`, takes the value of the name
+ * `x`. */
+let _record = fn(at: I32): Expr {
+  _expect("{");
+  let fields: Array<FieldValue> = [];
+
+  while (_more(fields.len(), "}")) {
+    let fieldAt = _peek().start;
+    let name = _word("name", true);
+    let value = _accept(":") ? _expr(0) : Expr.Name(fieldAt, name);
+    fields.push({ at: fieldAt, name: name, value: value });
+  }
+  _expect("}");
+  Expr.RecordLit(at, fields)
+};
+
+/* Checks whether the `{` about to be read opens a record rather than a block: it does when `}`,
+ * a name then `:`, `,` or `}`, or a keyword then `:` follows it. */
+let _braceIsRecord = fn(): Bool {
+  let first = _tokens[_pos + 1];
+
+  match (first.kind) {
+    Ident => {
+      let second = _tokens[_pos + 2].text;
+      (second == ":") || (second == ",") || (second == "}")
+    },
+    Keyword => _tokens[_pos + 2].text == ":",
+    Op => first.text == "}",
+    _ => false,
+  }
+};
+
+/* Returns the character that `value` holds if it is exactly one UTF-8 character, or -1. A
+ * character written in more bytes than it needs, a surrogate, or one past U+10FFFF is not one. */
+let _codePoint = fn(value: Bytes): I32 {
+  if (value.len() == 0) { return -1; }
+  let c = value.get(0);
+  let length = (c < 128) ? 1 : (c < 192) ? 0 : (c < 224) ? 2 : (c < 240) ? 3 : (c < 248) ? 4 : 0;
+  if (length != value.len()) { return -1; }
+  let point = (length == 1) ? c : (length == 2) ? c - 192 : (length == 3) ? c - 224 : c - 240;
+  let i = 1;
+
+  while (i < length) {
+    let b = value.get(i);
+    if ((b < 128) || (b >= 192)) { return -1; }
+    point = point * 64 + b - 128;
+    i++;
+  }
+  let least = (length == 1) ? 0 : (length == 2) ? 128 : (length == 3) ? 2048 : 65536;
+  let surrogate = (point >= 55296) && (point < 57344);
+  ((point < least) || surrogate || (point > 1114111)) ? -1 : point
+};
+
+/* Reads a pattern: `_`, a name to bind, a variant with or without fields, an integer, or a
+ * character's code, as in `"a".code`. */
+let _pattern = fn(): Pattern {
+  let token = _next();
+
+  match (token.kind) {
+    Int => Pattern.Int(token.start, token.text),
+    Bytes => {
+      if (!_accept(".")) { throw errorAt(token.start, "E0100", "ParseError: expected pattern"); }
+      let name = _next();
+      let code = match (name.kind) { Ident => name.text == "code", _ => false };
+      if (!code) { throw _error("E0100", "expected codepoint pattern"); }
+      let point = _codePoint(token.text);
+      if (point < 0) { throw _error("E0008", "'.code' requires one Unicode character"); }
+      Pattern.Int(token.start, intText(point))
+    },
+    Ident => {
+      if (token.text == "_") { return Pattern.Wildcard(token.start); }
+
+      if (_accept("(")) {
+        let fields: Array<Pattern> = [];
+        while (_more(fields.len(), ")")) { fields.push(_pattern()); }
+        _expect(")");
+        return Pattern.Variant(token.start, token.text, fields);
+      }
+      let first = token.text.get(0);
+      ((first >= "A".code) && (first <= "Z".code))
+        ? Pattern.Variant(token.start, token.text, [])
+        : Pattern.Bind(token.start, token.text)
+    },
+    Op => {
+      if (token.text != "-") { throw _error("E0100", "expected pattern"); }
+      let number = _next();
+
+      match (number.kind) {
+        Int => Pattern.Int(token.start, "-" + number.text),
+        _ => { throw _error("E0100", "expected a number after '-'"); },
+      }
+    },
+    _ => { throw _error("E0100", "expected pattern"); },
+  }
+};
+
+// Reads a match's arms: patterns separated by commas, `=>`, then a block or an expression.
+let _arms = fn(): Array<Arm> {
+  _expect("{");
+  let arms: Array<Arm> = [];
+
+  while (!_at("}")) {
+    let at = _peek().start;
+    let patterns = [_pattern()];
+
+    while (!_at("=>")) {
+      _expect(",");
+      if (_at("=>")) { break; }
+      patterns.push(_pattern());
+    }
+    _expect("=>");
+
+    let body = _at("{") ? _block() : { at: _peek().start, statements: [], tail: _expr(0) };
+    arms.push({ at: at, patterns: patterns, body: body });
+    _accept(",");
+  }
+  _expect("}");
+  arms
+};
+
+// Reads the rest of an expression that starts with keyword `token`.
+let _keywordExpr = fn(token: Token): Expr {
+  let word = token.text;
+  let at = token.start;
+  if (word == "true") { return Expr.Bool(at, true); }
+  if (word == "false") { return Expr.Bool(at, false); }
+  if (word == "null") { return Expr.Null(at); }
+  if (word == "fn") { return Expr.Function(at, _params(), _optionalType(), _block()); }
+
+  if (word == "if") {
+    let condition = _parenthesised();
+    let then = _block();
+    let otherwise: ?Expr = null;
+
+    if (_accept("else")) {
+      otherwise = _at("if") ? _primary() : Expr.BlockExpr(_peek().start, _block());
+    }
+    return Expr.If(at, condition, then, otherwise);
+  }
+
+  if (word == "match") { return Expr.Match(at, _parenthesised(), _arms()); }
+  if (word != "try") { throw _error("E0100", "expected expression"); }
+
+  let body = _block();
+  _expect("catch");
+  let name: ?Bytes = null;
+
+  if (_accept("(")) {
+    name = _ident();
+    _expect(")");
+  }
+  Expr.Try(at, body, name, _block())
+};
+
+let _primary = fn(): Expr {
+  let at = _peek().start;
+  if (_at("(")) { return _movedTo(_parenthesised(), at); }
+  if (_accept("[")) { return Expr.ArrayLit(at, _exprList("]")); }
+  if (_at("{")) { return _braceIsRecord() ? _record(at) : Expr.BlockExpr(at, _block()); }
+  let token = _next();
+
+  match (token.kind) {
+    Int => Expr.Int(at, token.text),
+    Bytes => Expr.Bytes(at, token.text),
+    Ident => Expr.Name(at, token.text),
+    Keyword => _keywordExpr(token),
+    _ => { throw _error("E0100", "expected expression"); },
+  }
+};
+
+// Reads a primary expression followed by any `.name`, `[index]`, `(args)`, `++` and `--`.
+let _postfix = fn(): Expr {
+  let out = _primary();
+  let more = true;
+
+  while (more) {
+    if (_accept(".")) {
+      out = Expr.Member(exprAt(out), out, _word("name", true));
+    } else if (_accept("[")) {
+      let index = _expr(0);
+      _expect("]");
+      out = Expr.Index(exprAt(out), out, index);
+    } else if (_accept("(")) {
+      out = Expr.Call(exprAt(out), out, _exprList(")"));
+    } else if (_at("++") || _at("--")) {
+      let op = _next();
+      if (!_assignable(out)) { throw _error("E0103", "invalid increment/decrement target"); }
+      out = Expr.Step(exprAt(out), op.text, false, out);
+    } else {
+      more = false;
+    }
+  }
+  out
+};
+
+// Reads an expression with any prefix operators and `as` casts.
+let _unary = fn(): Expr {
+  if (_at("!") || _at("-") || _at("++") || _at("--")) {
+    let token = _next();
+    let operand = _unary();
+
+    if ((token.text == "++") || (token.text == "--")) {
+      if (!_assignable(operand)) { throw _error("E0103", "invalid increment/decrement target"); }
+      return Expr.Step(token.start, token.text, true, operand);
+    }
+    return Expr.Unary(token.start, token.text, operand);
+  }
+  let out = _postfix();
+  while (_accept("as")) { out = Expr.Cast(exprAt(out), out, _type()); }
+  out
+};
+
+// Returns how tightly the binary operator `token` binds, or -1 if it is not one.
+let _precedence = fn(token: Token): I32 {
+  let i = _isWordToken(token) ? indexOf(_binaryOps, token.text) : -1;
+  (i < 0) ? -1 : _precedences[i]
+};
+
+/* Reads an expression whose operators all bind at least as tightly as `minPrec`, by precedence
+ * climbing. `?:` and `??` group to the right, and an assignment's value is read above its own
+ * level, so that assignments do not chain. */
+let _expr = fn(minPrec: I32): Expr {
+  let left = _unary();
+  let more = true;
+
+  while (more) {
+    let token = _peek();
+    let prec = _precedence(token);
+
+    if (prec < minPrec) {
+      more = false;
+    } else if (token.text == "?") {
+      _next();
+      let then = _expr(0);
+      _expect(":");
+      left = Expr.Conditional(exprAt(left), left, then, _expr(prec));
+    } else if (token.text == "??") {
+      _next();
+      left = Expr.Coalesce(exprAt(left), left, _expr(prec));
+    } else if (prec == 5) {
+      _next();
+      if (!_assignable(left)) { throw _error("E0103", "invalid assignment target"); }
+      let value = _expr(6);
+
+      if (_precedence(_peek()) == 5) {
+        throw _error("E0103", "assignments do not chain; assign each target in its own statement");
+      }
+      left = Expr.Assign(exprAt(left), token.text, left, value);
+    } else {
+      _next();
+      left = Expr.Binary(exprAt(left), token.text, left, _expr(prec + 1));
+    }
+  }
+  left
+};
+
+// Reads a loop's body, whose value is never used, so any tail becomes its last statement.
+let _loopBlock = fn(): Block {
+  let body = _block();
+  if (body.tail == null) { return body; }
+  body.statements.push(Stmt.Expression(exprAt(body.tail), body.tail));
+  { at: body.at, statements: body.statements, tail: null }
+};
+
+// Reads a field's `name: T`.
+let _field = fn(): Field {
+  let at = _peek().start;
+  let name = _ident();
+  _expect(":");
+  { at: at, name: name, ty: _type() }
+};
+
+// Reads a record type's fields: `{ let name: T; ... }`.
+let _fields = fn(): Array<Field> {
+  let fields: Array<Field> = [];
+  _expect("{");
+
+  while (!_at("}")) {
+    _expect("let");
+    fields.push(_field());
+    _expect(";");
+  }
+  _expect("}");
+  fields
+};
+
+// Reads the names of an `import` or a `load`: `{ a, b }`.
+let _names = fn(): Array<Bytes> {
+  let names: Array<Bytes> = [];
+  _expect("{");
+  while (_more(names.len(), "}")) { names.push(_ident()); }
+  _expect("}");
+  names
+};
+
+// Reads an enum's variants: `{ Name; Name(field: T, ...); }`.
+let _variants = fn(): Array<Variant> {
+  let variants: Array<Variant> = [];
+  _expect("{");
+
+  while (!_at("}")) {
+    let at = _peek().start;
+    let name = _ident();
+    let fields: Array<Field> = [];
+
+    if (_accept("(")) {
+      while (_more(fields.len(), ")")) { fields.push(_field()); }
+      _expect(")");
+    }
+    _expect(";");
+    variants.push({ at: at, name: name, fields: fields });
+  }
+  _expect("}");
+  variants
+};
+
+/* Reads a statement that starts with one of `_statementWords`, up to but not including any `;`
+ * after it. */
+let _keywordStatement = fn(): Stmt {
+  let token = _next();
+  let word = token.text;
+  if (word == "break") { return Stmt.Break(token.start); }
+  if (word == "continue") { return Stmt.Continue(token.start); }
+  if (word == "throw") { return Stmt.Throw(token.start, _expr(0)); }
+
+  if (word == "return") {
+    return Stmt.Return(token.start, (_at(";") || _at("}")) ? null : _expr(0));
+  }
+
+  if (word == "while") { return Stmt.While(token.start, _parenthesised(), _loopBlock()); }
+
+  if ((word == "import") || (word == "load")) {
+    let typeOnly = (word == "import") && _accept("type");
+    let names = _names();
+    _expect("from");
+    let path = _path();
+    if (word == "load") { return Stmt.Load(token.start, names, path); }
+    return Stmt.Import(token.start, typeOnly, names, path);
+  }
+
+  let exported = word == "export";
+  let kind = (exported ? _next() : token).text;
+
+  if ((kind == "let") || (kind == "const")) {
+    let nameAt = _peek().start;
+    let name = _ident();
+    let ty = _optionalType();
+    _expect("=");
+    return Stmt.Let(token.start, kind == "const", exported, nameAt, name, ty, _expr(0));
+  }
+
+  if (kind == "typedef") {
+    let name = _ident();
+    _expect("=");
+    return Stmt.Record(token.start, exported, name, _fields());
+  }
+  if (kind != "enum") { throw _error("E0107", "this declaration cannot be exported"); }
+  Stmt.Enum(token.start, exported, _ident(), _variants())
+};
+
+/* Reads statements up to `end`, or up to the end of the file when `end` is "", leaving it unread,
+ * into a block that starts at `at`; `what` names `end` in an error. An expression just before it,
+ * with no `;`, is the block's tail. */
+let _statements = fn(at: I32, end: Bytes, what: Bytes): Block {
+  let statements: Array<Stmt> = [];
+  let tail: ?Expr = null;
+
+  while (!_atEnd(end)) {
+    if (_isWordToken(_peek()) && (indexOf(_statementWords, _peek().text) >= 0)) {
+      let stmt = _keywordStatement();
+
+      match (stmt) {
+        Break(_), Continue(_), Return(_, _), Throw(_, _) => {
+          if (!_accept(";") && !_at("}")) { _expect(";"); }
+        },
+        Let(_, isConst, exported, _, _, _, _) => {
+          // A plain `let` missing its `;` at the end of a block reads as a `let` test.
+          let plain = !isConst && !exported;
+
+          if (plain && !_at(";") && _atEnd(end)) {
+            throw _error("E0109", "a `let` test can only be the condition of an `if` or a `while`");
+          }
+          if (plain && !_at(";")) { throw _error("E0100", "expected ';' or " + what); }
+          _expect(";");
+        },
+        Record(_, _, _, _), Import(_, _, _, _), Load(_, _, _) => { _expect(";"); },
+        While(_, _, _), Enum(_, _, _, _), Expression(_, _) => { _accept(";"); },
+      };
+      statements.push(stmt);
+      continue;
+    }
+
+    // An `if`, `match`, `try` or block ends with its own `}`, so needs no `;` as a statement.
+    let closed = _at("if") || _at("match") || _at("try") || (_at("{") && !_braceIsRecord());
+    let value = closed ? _primary() : _expr(0);
+
+    if (_accept(";") || (closed && !_atEnd(end))) {
+      statements.push(Stmt.Expression(exprAt(value), value));
+    } else if (_atEnd(end)) {
+      tail = value;
+    } else {
+      throw _error("E0100", "expected ';' or " + what);
+    }
+  }
+  { at: at, statements: statements, tail: tail }
+};
+
+let _block = fn(): Block {
+  let at = _peek().start;
+  _expect("{");
+  let out = _statements(at, "}", "'}'");
+  _expect("}");
+  out
+};
+
+/* Returns the syntax tree of `tokens`; throws the diagnostic for the first error. Closing a
+ * type's arguments with `>>` leaves `>` in its place in `tokens`. */
+export let parse = fn(tokens: Array<Token>): Program {
+  _tokens = tokens;
+  _pos = 0;
+  _seen = 0;
+  let packageName: ?Bytes = null;
+
+  if (_accept("package")) {
+    packageName = _path();
+    _expect(";");
+  }
+  { packageName: packageName, block: _statements(_peek().start, "", "end of input") }
+};

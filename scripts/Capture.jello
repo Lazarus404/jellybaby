@@ -1,15 +1,25 @@
 import { run } from std.io.Command;
 import { exists, makeDirs, readText, writeText } from std.io.File;
-import { indexOf } from std.core.Bytes;
+import { endsWith, indexOf } from std.core.Bytes;
 
 /* Records what jelloc makes of each test file: with --hir its typed tree in NAME.hir, otherwise
- * what the program prints in NAME.out. An existing file is only compared, unless --write is given.
- * Files are written as bytes, so they match on every platform, whatever a shell redirect does. */
+ * what the program prints in NAME.out. With --ir N it records chapter N's own IR instead, built in
+ * build/jbN.jlo, in tests/golden/NAME.ir. An existing file is only compared, unless --write is
+ * given. Files are written as bytes, so they match on every platform, whatever a shell redirect
+ * does. */
 
 let args = System.args;
 let write = List.contains(args, "--write");
 let hir = List.contains(args, "--hir");
+let irChapter: ?Bytes = null;
+let previous = "";
+
+for (word in args) {
+  if (previous == "--ir") { irChapter = word; }
+  previous = word;
+}
 makeDirs("build/capture");
+makeDirs("tests/golden");
 
 // Returns what the program in `file` prints, or `trap KIND` if it traps.
 let printed = fn(file: Bytes, name: Bytes): Bytes {
@@ -28,19 +38,21 @@ let printed = fn(file: Bytes, name: Bytes): Bytes {
   out
 };
 
-// Returns jelloc's typed tree for `file`.
-let typed = fn(file: Bytes): Bytes {
-  let (status, out, err) = run(["jelloc", file, "--hir"], []);
+// Returns what `command` prints, which must succeed.
+let stdoutOf = fn(command: Array<Bytes>): Bytes {
+  let (status, out, err) = run(command, []);
   if (status != 0) { throw err; }
   out
 };
 
 for (file in args) {
-  if ((file == "--write") || (file == "--hir")) { continue; }
+  if (!file.endsWith(".jello")) { continue; }
   let slash = file.lastIndexOf("/");
   let name = file.slice(slash + 1, file.len() - slash - 7);
-  let out = hir ? typed(file) : printed(file, name);
-  let path = file.slice(0, file.len() - 6) + (hir ? ".hir" : ".out");
+  let out = irChapter != null ? stdoutOf(["jello", "build/jb" + irChapter + ".jlo", file, "--ir"])
+    : hir ? stdoutOf(["jelloc", file, "--hir"]) : printed(file, name);
+  let path = irChapter != null ? "tests/golden/" + name + ".ir"
+    : file.slice(0, file.len() - 6) + (hir ? ".hir" : ".out");
 
   if (!exists(path) || write) {
     writeText(path, out);

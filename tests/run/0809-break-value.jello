@@ -1,0 +1,9 @@
+let i = 0;
+let total = 0;
+
+while (true) {
+  let v = if (i > 3) { break; 0 } else { i * 10 };
+  total += i == 2 ? { i++; continue; 0 } : v;
+  i++;
+}
+total + i

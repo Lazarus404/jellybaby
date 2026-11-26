@@ -1,0 +1,10 @@
+let i = 0;
+
+while (true) {
+  let v = if (i > 2) { break; 0 } else { i };
+  let w: I32 = if (v > 5) { continue; } else { break; };
+  let b = true && { break; true };
+  if (v == 1) { let a = 1; } else { let c = 2; }
+  { continue; 3 };
+}
+i

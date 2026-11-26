@@ -1,0 +1,21 @@
+program
+  global g0 c: bool
+    bool true: bool
+  global g1 x: i32
+    if: i32
+      condition
+        global g0: bool
+      then
+        i32 1: i32
+      else
+        i32 2: i32
+  if
+    condition
+      global g0: bool
+    then
+      expression
+        i32 1: i32
+    else
+      expression
+        bool false: bool
+  global g1: i32

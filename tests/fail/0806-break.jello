@@ -1,0 +1,2 @@
+// error: 2:1: break outside loop [E0307]
+break;

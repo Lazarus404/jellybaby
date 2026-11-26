@@ -1,0 +1,295 @@
+package ir;
+
+/** @file Lowers the typed tree to registers and basic blocks. */
+
+import type { HirExpr, HirProgram, HirStmt } from frontend.hir.Hir;
+import { atOf, isTrue, typeOf } from frontend.hir.Hir;
+import type { Type } from frontend.semantics.Types;
+import { sameType } from frontend.semantics.Types;
+import type { End, Function, Insn, IrOp } from ir.Model;
+import { errorAt } from frontend.syntax.Source;
+
+let _function: Function = { regs: [], blocks: [], order: [], result: Type.Null };
+let _open = 0;
+let _reachable = false;
+let _jumped: Array<Bool> = [];
+let _globalRegs: Array<I32> = [];
+let _localRegs: Array<I32> = [];
+let _headers: Array<I32> = [];
+let _exits: Array<I32> = [];
+
+// Stops at a construct not built yet; the I32 result lets it stand where a register is expected.
+let _unsupported = fn(at: I32, construct: Bytes): I32 {
+  throw errorAt(at, "", "not supported yet: " + construct);
+  0
+};
+
+// Adds a register of type `ty` for the node at `at`; code that never runs needs none.
+let _reg = fn(at: I32, ty: Type): I32 {
+  if (!_reachable) { return 0; }
+  if (_function.regs.len() == 256) { return _unsupported(at, "large expression"); }
+  _function.regs.push(ty);
+  _function.regs.len() - 1
+};
+
+let _block = fn(): I32 {
+  _function.blocks.push({ insns: [], end: null });
+  _jumped.push(false);
+  _function.blocks.len() - 1
+};
+
+// Names `block` as the target of a jump, which counts only if it can run.
+let _target = fn(block: I32): I32 {
+  if (_reachable) { _jumped[block] = true; }
+  block
+};
+
+/* Opens `block` for filling. It is placed after the blocks placed so far if it is the entry block
+ * or something jumps to it; otherwise nothing reaches it, and its code is dropped. */
+let _start = fn(block: I32): Void {
+  _open = block;
+  _reachable = (_function.order.len() == 0) || _jumped[block];
+  if (_reachable) { _function.order.push(block); }
+};
+
+// Closes the open block with `end`. Nothing reaches the code after it until a block is opened.
+let _end = fn(end: End): Void {
+  if (_reachable) { _function.blocks[_open].end = end; }
+  _reachable = false;
+};
+
+let _jump = fn(at: I32, block: I32): Void { _end(End.Jump(at, _target(block))); };
+
+let _insn = fn(insn: Insn): Void {
+  if (_reachable) { _function.blocks[_open].insns.push(insn); }
+};
+
+/* Branches on `condition` past a new block when `condition` is `skipWhen`, and opens that block.
+ * Returns the block after it, which `_rejoin` opens. */
+let _skip = fn(at: I32, condition: I32, skipWhen: Bool): I32 {
+  let next = _block();
+  let after = _block();
+  _end(skipWhen ? End.Branch(at, condition, _target(after), _target(next))
+    : End.Branch(at, condition, _target(next), _target(after)));
+  _start(next);
+  after
+};
+
+// Jumps from the open block to `block`, and opens it.
+let _rejoin = fn(at: I32, block: I32): Void {
+  _jump(at, block);
+  _start(block);
+};
+
+// Ends a then branch, which jumps to a new merge block, and opens `otherwise`; returns the merge.
+let _else = fn(at: I32, otherwise: I32): I32 {
+  let merge = _block();
+  _jump(at, merge);
+  _start(otherwise);
+  merge
+};
+
+let _copy = fn(at: I32, source: I32, ty: Type): I32 {
+  let out = _reg(at, ty);
+  _insn(Insn.Move(at, out, source));
+  out
+};
+
+let _constant = fn(at: I32, ty: Type, value: I32): I32 {
+  let out = _reg(at, ty);
+  _insn(Insn.Const(at, out, ty, value));
+  out
+};
+
+let _statements = fn(statements: Array<HirStmt>): Void {
+  let i = 0;
+
+  while (i < statements.len()) {
+    _stmt(statements[i]);
+    i++;
+  }
+};
+
+// Copies `value` into a variable's register `target`; the result is the value's own register.
+let _store = fn(at: I32, target: I32, value: HirExpr): I32 {
+  let source = _expr(value);
+  _insn(Insn.Move(at, target, source));
+  source
+};
+
+let _choice = fn(at: I32, condition: HirExpr, then: HirExpr, otherwise: HirExpr, ty: Type): I32 {
+  let conditionReg = _expr(condition);
+  let out = _reg(at, ty);
+  let no = _skip(at, conditionReg, false);
+  _insn(Insn.Move(at, out, _expr(then)));
+  let merge = _else(at, no);
+  _insn(Insn.Move(at, out, _expr(otherwise)));
+  _rejoin(at, merge);
+  out
+};
+
+// `a && b` is `a`, unless `a` is true, when it is `b`; `a || b` is the mirror image.
+let _shortCircuit = fn(at: I32, and: Bool, left: HirExpr, right: HirExpr): I32 {
+  let out = _reg(at, Type.Bool);
+  let first = _expr(left);
+  _insn(Insn.Move(at, out, first));
+  let after = _skip(at, first, !and);
+  _insn(Insn.Move(at, out, _expr(right)));
+  _rejoin(at, after);
+  out
+};
+
+// The VM has no Bool equality: `a == b` is `b` when `a` is true, and `!b` when it is false.
+let _boolEq = fn(at: I32, left: HirExpr, right: HirExpr): I32 {
+  let a = _expr(left);
+  let b = _expr(right);
+  let out = _reg(at, Type.Bool);
+  _insn(Insn.Move(at, out, b));
+  let after = _skip(at, a, true);
+  _insn(Insn.Unary(at, IrOp.Not, out, b));
+  _rejoin(at, after);
+  out
+};
+
+/* The VM traps on the least I32 divided by -1, where Jello wraps, so a divisor that may be -1 is
+ * tested first: by -1, `a / b` is `-a` and `a % b` is 0. */
+let _division = fn(at: I32, rem: Bool, left: HirExpr, right: HirExpr): I32 {
+  let a = _expr(left);
+  let literal = match (right) { Int(_, _) => true, _ => false };
+  let minusOne = match (right) { Int(_, value) => value == -1, _ => false };
+  let b = minusOne ? 0 : _expr(right);
+  let out = _reg(at, Type.I32);
+  let divide = Insn.Binary(at, rem ? IrOp.Rem : IrOp.Div, out, a, b);
+  let byMinusOne = rem ? Insn.Const(at, out, Type.I32, 0) : Insn.Unary(at, IrOp.Neg, out, a);
+
+  if (literal) {
+    _insn(minusOne ? byMinusOne : divide);
+    return out;
+  }
+  let negativeOne = _constant(at, Type.I32, -1);
+  let isMinusOne = _reg(at, Type.Bool);
+  _insn(Insn.Binary(at, IrOp.Eq, isMinusOne, b, negativeOne));
+  _insn(byMinusOne);
+  let after = _skip(at, isMinusOne, true);
+  _insn(divide);
+  _rejoin(at, after);
+  out
+};
+
+// `a > b` is `b < a`, so `swapped` exchanges the operands.
+let _binary = fn(at: I32, op: IrOp, ty: Type, left: HirExpr, right: HirExpr, swapped: Bool): I32 {
+  let a = _expr(left);
+  let b = _expr(right);
+  let out = _reg(at, ty);
+  _insn(Insn.Binary(at, op, out, swapped ? b : a, swapped ? a : b));
+  out
+};
+
+let _expr = fn(expr: HirExpr): I32 { match (expr) {
+  Int(at, value) => _constant(at, Type.I32, value),
+  Bool(at, value) => _constant(at, Type.Bool, value ? 1 : 0),
+  Null(at) => _constant(at, Type.Null, 0),
+  Bytes(at, _) => _unsupported(at, "bytes literal"),
+  Local(at, id, ty) => _copy(at, _localRegs[id], ty),
+  Global(at, id, ty) => _copy(at, _globalRegs[id], ty),
+  Assign(at, id, value) => _store(at, _localRegs[id], value),
+  SetGlobal(at, id, value) => _store(at, _globalRegs[id], value),
+  Unary(at, op, operand) => {
+    let source = _expr(operand);
+    let out = _reg(at, typeOf(expr));
+    _insn(Insn.Unary(at, match (op) { Neg => IrOp.Neg, _ => IrOp.Not }, out, source));
+    out
+  },
+  Binary(at, op, left, right) => match (op) {
+    Add => _binary(at, IrOp.Add, Type.I32, left, right, false),
+    Sub => _binary(at, IrOp.Sub, Type.I32, left, right, false),
+    Mul => _binary(at, IrOp.Mul, Type.I32, left, right, false),
+    Div => _division(at, false, left, right),
+    Rem => _division(at, true, left, right),
+    Lt => _binary(at, IrOp.Lt, Type.Bool, left, right, false),
+    Gt => _binary(at, IrOp.Lt, Type.Bool, left, right, true),
+    Eq => sameType(typeOf(left), Type.Bool) ? _boolEq(at, left, right)
+      : _binary(at, IrOp.Eq, Type.Bool, left, right, false),
+    And => _shortCircuit(at, true, left, right),
+    Or => _shortCircuit(at, false, left, right),
+    _ => _unsupported(at, "bytes operation"),
+  },
+  // A block with no tail ends every path, so nothing reads its result.
+  Block(_, statements, tail, _) => {
+    _statements(statements);
+    tail == null ? 0 : _expr(tail)
+  },
+  If(at, condition, then, otherwise, ty) => _choice(at, condition, then, otherwise, ty),
+} };
+
+// Gives variable `id` its own register. Ids skip variables in code that is never lowered.
+let _bind = fn(at: I32, regs: Array<I32>, id: I32, value: HirExpr): Void {
+  let reg = _copy(at, _expr(value), typeOf(value));
+  while (regs.len() <= id) { regs.push(0); }
+  regs[id] = reg;
+};
+
+let _ifStatement = fn(
+  at: I32,
+  condition: HirExpr,
+  then: Array<HirStmt>,
+  otherwise: ?Array<HirStmt>
+): Void {
+  let merge = _skip(at, _expr(condition), false);
+  _statements(then);
+
+  if (otherwise != null) {
+    merge = _else(at, merge);
+    _statements(otherwise);
+  }
+  _rejoin(at, merge);
+};
+
+// A loop whose condition is `true` has no test: it jumps straight back into its body.
+let _while = fn(at: I32, condition: HirExpr, body: Array<HirStmt>): Void {
+  let forever = isTrue(condition);
+  let header = _block();
+  let loop = forever ? header : _block();
+  let exit = _block();
+  _rejoin(at, header);
+
+  if (!forever) {
+    _end(End.Branch(at, _expr(condition), _target(loop), _target(exit)));
+    _start(loop);
+  }
+  _headers.push(header);
+  _exits.push(exit);
+  _statements(body);
+  _jump(at, header);
+  _headers.pop();
+  _exits.pop();
+  _start(exit);
+};
+
+let _stmt = fn(stmt: HirStmt): Void { match (stmt) {
+  Global(at, id, _, value) => _bind(at, _globalRegs, id, value),
+  Let(at, id, _, _, value) => _bind(at, _localRegs, id, value),
+  Expression(value) => {
+    _expr(value);
+    return;
+  },
+  Block(statements) => _statements(statements),
+  If(at, condition, then, otherwise) => _ifStatement(at, condition, then, otherwise),
+  While(at, condition, body, _) => _while(at, condition, body),
+  Break(at) => _jump(at, _exits[_exits.len() - 1]),
+  Continue(at) => _jump(at, _headers[_headers.len() - 1]),
+} };
+
+// Lowers a whole program into the entry function, which returns the program's value.
+export let lower = fn(program: HirProgram): Function {
+  _function = { regs: [], blocks: [], order: [], result: typeOf(program.tail) };
+  _globalRegs = [];
+  _localRegs = [];
+  _headers = [];
+  _exits = [];
+  _jumped = [];
+  _start(_block());
+  _statements(program.statements);
+  _end(End.Return(atOf(program.tail), _expr(program.tail)));
+  _function
+};

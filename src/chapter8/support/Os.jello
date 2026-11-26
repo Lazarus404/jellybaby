@@ -1,0 +1,30 @@
+package support;
+
+/** @file Files, the command line and the exit status, through the natives of std.jdll. */
+
+load { file_contents, file_write, args_count, args_get, process_exit } from std;
+
+let _read: (Bytes) -> Dynamic = file_contents;
+
+// Returns the contents of the file at `path`, or null if it cannot be read.
+export let readFile = fn(path: Bytes): ?Bytes {
+  let text = _read(path);
+  if (text == null) { return null; }
+  text as Bytes
+};
+
+// Writes `text` to the file at a path, replacing what was there; returns whether it could.
+export let writeFile: (Bytes, Bytes) -> Bool = file_write;
+
+export let stdout = fn(text: Bytes): Void { writeFile("/dev/stdout", text); };
+
+export let stderr = fn(text: Bytes): Void { writeFile("/dev/stderr", text); };
+
+// Returns how many arguments follow the module on the command line.
+export let argCount: () -> I32 = args_count;
+
+// Returns an argument by its index, counting from 0.
+export let arg: (I32) -> Bytes = args_get;
+
+// Ends the process with the exit status it is given.
+export let exit: (I32) -> I32 = process_exit;

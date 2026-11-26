@@ -1,0 +1,122 @@
+import { run } from std.io.Command;
+import { makeDirs, writeText } from std.io.File;
+import { indexOf } from std.core.Bytes;
+
+let dir = List.len(System.args) > 0 ? List.head(System.args) : "examples/chapter08";
+let compiler = "build/jb8.jlo";
+let text = "build/check.jlo.txt";
+let module = "build/check.jlo";
+let reference = "build/check-reference.jlo";
+let failed = false;
+
+let say = fn(line: Bytes): Void { writeText("/dev/stdout", line + "\n"); };
+
+let firstLine = fn(text: Bytes): Bytes {
+  let end = text.indexOf("\n");
+  end < 0 ? text : text.slice(0, end)
+};
+
+let fail = fn(line: Bytes): Void {
+  say("FAIL " + line);
+  failed = true;
+};
+
+// Returns a run's output, or `trap KIND` if it trapped, so that both compilers' runs compare.
+let normalRun = fn(status: I32, out: Bytes, err: Bytes): Bytes {
+  let trap = err.indexOf("TRAP code=");
+  (status != 0) && (trap >= 0)
+    ? "trap " + firstLine(err.slice(trap + 10, err.len() - trap - 10)) + "\n" : out
+};
+
+let ours = fn(file: Bytes): Bytes {
+  let (compiled, _, err) = run(["jello", compiler, file, "--out", text], []);
+  if (compiled != 0) { return firstLine(err); }
+  let (assembled, _, asmErr) = run(["jlo_tool", "asm", text, "-o", module], []);
+  if (assembled != 0) { return firstLine(asmErr); }
+  let (status, out, runErr) = run(
+    ["jlo_tool", "run", "--print", "--fuel", "10000000", module], []);
+  normalRun(status, out, runErr)
+};
+
+let theirs = fn(file: Bytes): Bytes {
+  let (compiled, _, err) = run(["jelloc", file, "--out", reference], []);
+  if (compiled != 0) { return firstLine(err); }
+  let (status, out, runErr) = run(
+    ["jlo_tool", "run", "--print", "--fuel", "10000000", reference], []);
+  normalRun(status, out, runErr)
+};
+
+let both = fn(name: Bytes, file: Bytes, want: Bytes): Void {
+  let got = ours(file);
+  let referenceOut = theirs(file);
+
+  if ((got == want) && (referenceOut == want)) {
+    say("ok   " + name + " -> " + firstLine(want));
+  } else { fail(name + ": " + firstLine(got) + " / jelloc: " + firstLine(referenceOut)); }
+};
+
+let rejects = fn(name: Bytes, file: Bytes): Void {
+  let (status, _, err) = run(["jello", compiler, file], []);
+  let (theirs, _, theirErr) = run(["jelloc", file, "--out", module], []);
+
+  if ((status == 1) && (theirs == 1) && (err == theirErr)) {
+    say("ok   " + name + " -> " + firstLine(err));
+  } else { fail(name + ": " + firstLine(err) + " / jelloc: " + firstLine(theirErr)); }
+};
+
+let prints = fn(name: Bytes, source: Bytes, want: Bytes): Void {
+  writeText("build/prints.jello", source);
+  both(name, "build/prints.jello", want);
+};
+
+let notYet = fn(name: Bytes, source: Bytes, want: Bytes): Void {
+  writeText("build/not-yet.jello", source);
+  let (status, _, err) = run(["jello", compiler, "build/not-yet.jello"], []);
+  let (theirs, _, _) = run(["jelloc", "run", "build/not-yet.jello"], []);
+
+  if ((status == 1) && (err == want) && (theirs == 0)) {
+    say("ok   " + name + " not supported yet");
+  } else { fail(name + ": " + firstLine(err)); }
+};
+
+let ones = fn(count: I32): Bytes {
+  let text = "1";
+  let i = 1;
+
+  while (i < count) {
+    text += " + 1";
+    i++;
+  }
+  text
+};
+
+makeDirs("build");
+let (built, _, buildErr) = run(["jelloc", "src/chapter8/Main.jello", "--out", compiler], []);
+
+if (built != 0) {
+  say("FAIL build: " + firstLine(buildErr));
+  System.exit(1);
+}
+
+both("gcd", dir + "/gcd.jello", "21\n");
+both("collatz", dir + "/collatz.jello", "111\n");
+both("forever", dir + "/forever.jello", "trap FUEL\n");
+rejects("outside", dir + "/outside.jello");
+prints("&&", "let x = 0;\nfalse && ((x = 5) > 0);\nx", "0\n");
+prints("Bool ==", "true == false", "false\n");
+notYet("bytes", "let s = 1;\n\"a\"", "build/not-yet.jello:2:1: not supported yet: bytes literal\n"
+  + "\"a\"\n^\n");
+prints("128 terms", ones(128), "128\n");
+let wider = ones(129);
+notYet("129 terms", wider, "build/not-yet.jello:1:1: not supported yet: large expression\n"
+  + wider + "\n^\n");
+
+let (corpus, out, err) = run(["jelloc", "run", "scripts/Corpus.jello", "8"], []);
+writeText("/dev/stdout", out + err);
+if (corpus != 0) { failed = true; }
+
+if (failed) {
+  say("some checks failed");
+  System.exit(1);
+}
+say("all checks ok");

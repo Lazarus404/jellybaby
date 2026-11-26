@@ -1,0 +1,64 @@
+package ir;
+
+/** @file Prints the basic-block IR in jelloc's vocabulary. */
+
+import type { End, Function, Insn, IrOp } from ir.Model;
+import type { Type } from frontend.semantics.Types;
+import { hirName } from frontend.semantics.Types;
+import { intText, join } from support.Text;
+
+let _op = fn(op: IrOp): Bytes { match (op) {
+  Add => "add.wrap.i32", Sub => "sub.wrap.i32", Mul => "mul.wrap.i32",
+  Div => "div.s.i32", Rem => "rem.s.i32", Neg => "neg.wrap.i32", Not => "not.bool",
+  Eq => "eq.i32", Lt => "lt.s.i32",
+} };
+
+let _insn = fn(insn: Insn): Bytes { match (insn) {
+  Const(_, dst, ty, value) => "    %" + intText(dst) + " = " + match (ty) {
+    I32 => "i32 " + intText(value), Bool => "bool " + (value == 0 ? "false" : "true"), _ => "null",
+  } + "\n",
+  Move(_, dst, src) => "    %" + intText(dst) + " = move %" + intText(src) + "\n",
+  Unary(_, op, dst, src) => "    %" + intText(dst) + " = " + _op(op) + " %" + intText(src) + "\n",
+  Binary(_, op, dst, left, right) => "    %" + intText(dst) + " = " + _op(op) + " %"
+    + intText(left) + ", %" + intText(right) + "\n",
+} };
+
+let _end = fn(end: End): Bytes { match (end) {
+  Jump(_, target) => "    jump block " + intText(target) + "\n",
+  Branch(_, condition, then, otherwise) => "    branch %" + intText(condition) + ", block "
+    + intText(then) + ", block " + intText(otherwise) + "\n",
+  Return(_, value) => "    return %" + intText(value) + "\n",
+} };
+
+// Names an IR type as jelloc does: a Null value lives in a dynamic register.
+let _type = fn(ty: Type): Bytes { match (ty) {
+  Null => "dynamic",
+  _ => hirName(ty),
+} };
+
+export let printIr = fn(function: Function): Bytes {
+  let parts = ["fn @0() -> " + _type(function.result) + " entry 0 {\n"];
+  let i = 0;
+
+  while (i < function.regs.len()) {
+    parts.push("  register %" + intText(i) + ": " + _type(function.regs[i]) + "\n");
+    i++;
+  }
+  i = 0;
+
+  while (i < function.order.len()) {
+    let id = function.order[i];
+    let block = function.blocks[id];
+    parts.push("  block " + intText(id) + ":\n");
+    let j = 0;
+
+    while (j < block.insns.len()) {
+      parts.push(_insn(block.insns[j]));
+      j++;
+    }
+    if (block.end != null) { parts.push(_end(block.end)); }
+    i++;
+  }
+  parts.push("}\n");
+  join(parts)
+};

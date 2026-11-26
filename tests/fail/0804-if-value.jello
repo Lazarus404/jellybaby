@@ -1,0 +1,2 @@
+// error: 2:9: an if used as a value needs an else branch [E0410]
+let x = if (true) { 2 };

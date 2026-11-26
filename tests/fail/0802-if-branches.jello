@@ -1,0 +1,2 @@
+// error: 2:24: if branches must have the same type, not I32 and Bool [E0400]
+if (true) { 2 } else { false }

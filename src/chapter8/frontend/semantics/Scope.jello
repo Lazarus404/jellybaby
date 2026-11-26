@@ -1,0 +1,71 @@
+package frontend.semantics;
+
+/** @file A stack-backed symbol table with block marks. */
+
+import type { Type } from frontend.semantics.Types;
+import { errorAt } from frontend.syntax.Source;
+
+export typedef Binding = {
+  let name: Bytes;
+  let id: I32;
+  let ty: Type;
+  let mutable: Bool;
+  let global: Bool;
+  let at: I32;
+};
+
+let _bindings: Array<Binding> = [];
+let _marks: Array<I32> = [];
+let _nextGlobal = 0;
+let _nextLocal = 0;
+
+export let reset = fn(): Void {
+  _bindings = [];
+  _marks = [];
+  _nextGlobal = 0;
+  _nextLocal = 0;
+};
+
+export let enter = fn(): Void { _marks.push(_bindings.len()); };
+
+export let leave = fn(): Void {
+  let mark = _marks.pop();
+  while (_bindings.len() > mark) { _bindings.pop(); }
+};
+
+export let topLevel = fn(): Bool { _marks.len() == 0 };
+
+// Throws E0302 if the innermost block, or the top level, already declares `name`.
+export let fresh = fn(name: Bytes, at: I32): Void {
+  let i = topLevel() ? 0 : _marks[_marks.len() - 1];
+
+  while (i < _bindings.len()) {
+    if (_bindings[i].name == name) {
+      let what = topLevel() ? "duplicate top-level name: " : "duplicate local: ";
+      throw errorAt(at, "E0302", what + name);
+    }
+    i++;
+  }
+};
+
+// Declares `name`: a global `gN` at the top level, otherwise a local `%N`.
+export let declare = fn(name: Bytes, ty: Type, mutable: Bool, at: I32): Binding {
+  fresh(name, at);
+  let global = topLevel();
+  let id = global ? _nextGlobal : _nextLocal;
+  if (global) { _nextGlobal++; } else { _nextLocal++; }
+  let binding: Binding = { name: name, id: id, ty: ty, mutable: mutable, global: global, at: at };
+  _bindings.push(binding);
+  binding
+};
+
+// Finds the innermost binding of `name`, or null.
+export let lookup = fn(name: Bytes): ?Binding {
+  let i = _bindings.len() - 1;
+
+  while (i >= 0) {
+    if (_bindings[i].name == name) { return _bindings[i]; }
+    i--;
+  }
+  null
+};

@@ -1,0 +1,2 @@
+// error: 2:8: while condition must be Bool, not I32 [E0400]
+while (1) { }

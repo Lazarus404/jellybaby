@@ -1,0 +1,15 @@
+let outer = 0;
+let total = 0;
+
+while (outer < 4) {
+  outer++;
+  let inner = 0;
+
+  while (inner < 5) {
+    inner++;
+    if (inner == 2) { continue; }
+    if (outer == 3) { break; }
+    total++;
+  }
+}
+total

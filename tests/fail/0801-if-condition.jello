@@ -1,0 +1,2 @@
+// error: 2:5: if condition must be Bool, not I32 [E0400]
+if (1) { 2 } else { 3 }

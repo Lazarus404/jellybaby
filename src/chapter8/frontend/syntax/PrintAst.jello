@@ -1,0 +1,275 @@
+package frontend.syntax;
+
+/** @file The printer for `--ast`, which writes a syntax tree back as fully parenthesised source. */
+
+import type {
+  Expr, Stmt, TypeExpr, Pattern, Block, Param, Arm, Field, Program
+} from frontend.syntax.Ast;
+import { escape, join } from support.Text;
+
+// Returns the indent for nesting `depth`: two spaces a level.
+let _indent = fn(depth: I32): Bytes {
+  let out = "";
+  let i = 0;
+
+  while (i < depth) {
+    out += "  ";
+    i++;
+  }
+  out
+};
+
+let _type = fn(ty: TypeExpr): Bytes {
+  match (ty) {
+    Named(_, name) => name,
+    Generic(_, name, args) => name + "<" + _types(args) + ">",
+    Optional(_, inner) => "?" + _type(inner),
+    Function(_, params, result) => "(" + _types(params) + ") -> " + _type(result),
+  }
+};
+
+// Returns `: T` for a type that is given, or nothing.
+let _typed = fn(ty: ?TypeExpr): Bytes { (ty == null) ? "" : ": " + _type(ty) };
+
+// Returns `types`, separated by commas.
+let _types = fn(types: Array<TypeExpr>): Bytes {
+  let parts: Array<Bytes> = [];
+  let i = 0;
+
+  while (i < types.len()) {
+    parts.push(((i > 0) ? ", " : "") + _type(types[i]));
+    i++;
+  }
+  join(parts)
+};
+
+let _pattern = fn(pattern: Pattern): Bytes {
+  match (pattern) {
+    Wildcard(_) => "_",
+    Bind(_, name) => name,
+    Int(_, digits) => digits,
+    Variant(_, name, fields) => (fields.len() == 0) ? name : name + "(" + _patterns(fields) + ")",
+  }
+};
+
+// Returns `patterns`, separated by commas.
+let _patterns = fn(patterns: Array<Pattern>): Bytes {
+  let parts: Array<Bytes> = [];
+  let i = 0;
+
+  while (i < patterns.len()) {
+    parts.push(((i > 0) ? ", " : "") + _pattern(patterns[i]));
+    i++;
+  }
+  join(parts)
+};
+
+// Returns `exprs`, at nesting `depth`, separated by commas.
+let _exprs = fn(exprs: Array<Expr>, depth: I32): Bytes {
+  let parts: Array<Bytes> = [];
+  let i = 0;
+
+  while (i < exprs.len()) {
+    parts.push(((i > 0) ? ", " : "") + _expr(exprs[i], depth));
+    i++;
+  }
+  join(parts)
+};
+
+let _field = fn(field: Field): Bytes { field.name + ": " + _type(field.ty) };
+
+// Returns an enum variant's `fields`, separated by commas.
+let _fields = fn(fields: Array<Field>): Bytes {
+  let parts: Array<Bytes> = [];
+  let i = 0;
+
+  while (i < fields.len()) {
+    parts.push(((i > 0) ? ", " : "") + _field(fields[i]));
+    i++;
+  }
+  join(parts)
+};
+
+let _params = fn(params: Array<Param>): Bytes {
+  let parts = ["("];
+  let i = 0;
+
+  while (i < params.len()) {
+    parts.push(((i > 0) ? ", " : "") + params[i].name + _typed(params[i].ty));
+    i++;
+  }
+  parts.push(")");
+  join(parts)
+};
+
+/* Returns `block`'s statements and then its tail, a line each at nesting `depth`. The tail is
+ * wrapped in parentheses, so that `{ x }` does not come back as a record. */
+let _lines = fn(block: Block, depth: I32): Bytes {
+  let parts: Array<Bytes> = [];
+  let i = 0;
+
+  while (i < block.statements.len()) {
+    parts.push(_stmt(block.statements[i], depth));
+    i++;
+  }
+  if (block.tail != null) { parts.push(_indent(depth) + "(" + _expr(block.tail, depth) + ")\n"); }
+  join(parts)
+};
+
+let _block = fn(block: Block, depth: I32): Bytes {
+  "{\n" + _lines(block, depth + 1) + _indent(depth) + "}"
+};
+
+let _isRecord = fn(expr: Expr): Bool { match (expr) { RecordLit(_, _) => true, _ => false } };
+
+/* Returns a match, with each arm on a line of its own. An arm whose value is a record keeps the
+ * braces of a block, since a `{` after `=>` always reads as one. */
+let _match = fn(subject: Expr, arms: Array<Arm>, depth: I32): Bytes {
+  let parts = ["match (" + _expr(subject, depth) + ") {\n"];
+  let i = 0;
+
+  while (i < arms.len()) {
+    let body = arms[i].body;
+    let simple = (body.statements.len() == 0) && (body.tail != null) && !_isRecord(body.tail);
+    let value = simple ? _expr(body.tail, depth + 1) : _block(body, depth + 1);
+    parts.push(_indent(depth + 1) + _patterns(arms[i].patterns) + " => " + value + "\n");
+    i++;
+  }
+  parts.push(_indent(depth) + "}");
+  join(parts)
+};
+
+// Returns an `if` without parentheses around it, so that it can follow an `else`.
+let _if = fn(condition: Expr, then: Block, otherwise: ?Expr, depth: I32): Bytes {
+  let out = "if (" + _expr(condition, depth) + ") " + _block(then, depth);
+  if (otherwise == null) { return out; }
+
+  let rest = match (otherwise) {
+    If(_, inner, innerThen, innerOtherwise) => _if(inner, innerThen, innerOtherwise, depth),
+    _ => _expr(otherwise, depth),
+  };
+  out + " else " + rest
+};
+
+// Returns `left op right` in parentheses.
+let _operator = fn(left: Bytes, op: Bytes, right: Bytes): Bytes {
+  "(" + left + " " + op + " " + right + ")"
+};
+
+/* Returns `expr` at nesting `depth`. Every operator is wrapped in parentheses, which shows how
+ * the parser grouped it. */
+let _expr = fn(expr: Expr, depth: I32): Bytes {
+  match (expr) {
+    Int(_, digits) => digits,
+    Bytes(_, value) => escape(value),
+    Bool(_, value) => value ? "true" : "false",
+    Null(_) => "null",
+    Name(_, name) => name,
+    Unary(_, op, operand) => "(" + op + _expr(operand, depth) + ")",
+    Binary(_, op, left, right) => _operator(_expr(left, depth), op, _expr(right, depth)),
+    Assign(_, op, target, value) => _operator(_expr(target, depth), op, _expr(value, depth)),
+    Step(_, op, prefix, target) => {
+      let operand = _expr(target, depth);
+      "(" + (prefix ? op + operand : operand + op) + ")"
+    },
+    Conditional(_, condition, then, otherwise) => {
+      let choice = _expr(then, depth) + " : " + _expr(otherwise, depth);
+      _operator(_expr(condition, depth), "?", choice)
+    },
+    Coalesce(_, left, right) => _operator(_expr(left, depth), "??", _expr(right, depth)),
+    Cast(_, value, ty) => _operator(_expr(value, depth), "as", _type(ty)),
+    Call(_, callee, args) => _expr(callee, depth) + "(" + _exprs(args, depth) + ")",
+    Member(_, object, name) => _expr(object, depth) + "." + name,
+    Index(_, object, index) => _expr(object, depth) + "[" + _expr(index, depth) + "]",
+    Function(_, params, result, body) => {
+      "fn" + _params(params) + _typed(result) + " " + _block(body, depth)
+    },
+    If(_, condition, then, otherwise) => "(" + _if(condition, then, otherwise, depth) + ")",
+    Match(_, subject, arms) => _match(subject, arms, depth),
+    Try(_, body, name, handler) => {
+      let binding = (name == null) ? "" : "(" + name + ")";
+      "try " + _block(body, depth) + " catch" + binding + " " + _block(handler, depth)
+    },
+    BlockExpr(_, block) => _block(block, depth),
+    ArrayLit(_, items) => "[" + _exprs(items, depth) + "]",
+    RecordLit(_, fields) => {
+      let parts = ["{"];
+      let i = 0;
+
+      while (i < fields.len()) {
+        let field = fields[i];
+        parts.push(((i > 0) ? ", " : "") + field.name + ": " + _expr(field.value, depth));
+        i++;
+      }
+      parts.push("}");
+      join(parts)
+    },
+  }
+};
+
+// Returns `{ a, b }`, as an `import` or a `load` lists its names.
+let _names = fn(names: Array<Bytes>): Bytes {
+  let parts = ["{ "];
+  let i = 0;
+
+  while (i < names.len()) {
+    parts.push(((i > 0) ? ", " : "") + names[i]);
+    i++;
+  }
+  parts.push(" }");
+  join(parts)
+};
+
+// Returns `stmt` on a line of its own, indented for nesting `depth`.
+let _stmt = fn(stmt: Stmt, depth: I32): Bytes {
+  let pad = _indent(depth);
+
+  match (stmt) {
+    Let(_, isConst, exported, _, name, ty, value) => {
+      let keyword = (exported ? "export " : "") + (isConst ? "const " : "let ");
+      pad + keyword + name + _typed(ty) + " = " + _expr(value, depth) + ";\n"
+    },
+    Expression(_, value) => pad + _expr(value, depth) + ";\n",
+    While(_, condition, body) => {
+      pad + "while (" + _expr(condition, depth) + ") " + _block(body, depth) + "\n"
+    },
+    Break(_) => pad + "break;\n",
+    Continue(_) => pad + "continue;\n",
+    Return(_, value) => pad + "return" + ((value == null) ? "" : " " + _expr(value, depth)) + ";\n",
+    Throw(_, value) => pad + "throw " + _expr(value, depth) + ";\n",
+    Record(_, exported, name, fields) => {
+      let parts = [pad + (exported ? "export " : "") + "typedef " + name + " = { "];
+      let i = 0;
+
+      while (i < fields.len()) {
+        parts.push("let " + _field(fields[i]) + "; ");
+        i++;
+      }
+      parts.push("};\n");
+      join(parts)
+    },
+    Enum(_, exported, name, variants) => {
+      let parts = [pad + (exported ? "export " : "") + "enum " + name + " {\n"];
+      let i = 0;
+
+      while (i < variants.len()) {
+        let fields = variants[i].fields;
+        let typed = (fields.len() == 0) ? "" : "(" + _fields(fields) + ")";
+        parts.push(_indent(depth + 1) + variants[i].name + typed + ";\n");
+        i++;
+      }
+      parts.push(pad + "}\n");
+      join(parts)
+    },
+    Import(_, typeOnly, names, path) => {
+      pad + "import " + (typeOnly ? "type " : "") + _names(names) + " from " + path + ";\n"
+    },
+    Load(_, names, library) => pad + "load " + _names(names) + " from " + library + ";\n",
+  }
+};
+
+// Returns `program` as source.
+export let printProgram = fn(program: Program): Bytes {
+  let name = program.packageName;
+  ((name == null) ? "" : "package " + name + ";\n\n") + _lines(program.block, 0)
+};

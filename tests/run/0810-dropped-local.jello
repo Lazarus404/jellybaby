@@ -1,0 +1,16 @@
+let r = 0;
+
+while (r < 1) {
+  if (r == 5) {
+    let w: I32 = {
+      continue;
+      {
+        let y = 1;
+        y
+      }
+    };
+  }
+  let k = 7;
+  r = k;
+}
+r

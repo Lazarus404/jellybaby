@@ -1,0 +1,428 @@
+package frontend.semantics;
+
+/** @file Checks the parsed program and builds its typed tree. */
+
+import type { Block, Expr, Program, Stmt } from frontend.syntax.Ast;
+import { exprAt, stmtAt } from frontend.syntax.Ast;
+import type { HirExpr, HirOp, HirProgram, HirStmt } from frontend.hir.Hir;
+import { atOf, ends, typeOf } from frontend.hir.Hir;
+import type { Binding } from frontend.semantics.Scope;
+import { declare, enter, fresh, leave, lookup, reset, topLevel } from frontend.semantics.Scope;
+import type { Type } from frontend.semantics.Types;
+import { resolve, sameType, typeName } from frontend.semantics.Types;
+import { errorAt } from frontend.syntax.Source;
+
+// Returns the diagnostic for a construct not built yet, for the caller to throw.
+let _notYet = fn(at: I32, construct: Bytes): Bytes {
+  errorAt(at, "", "not supported yet: " + construct)
+};
+
+/* Reads a decimal literal into its negative representation, which includes I32's otherwise
+ * unrepresentable minimum value. A negative literal is reported from its minus sign at `at`. */
+let _literal = fn(at: I32, digits: Bytes, negative: Bool): I32 {
+  let limit = negative ? -2147483648 : -2147483647;
+  let value = 0;
+  let i = 0;
+
+  while (i < digits.len()) {
+    let digit = digits.get(i) - "0".code;
+
+    if (value < (limit + digit) / 10) {
+      let text = (negative ? "-" : "") + digits;
+      let range = " is out of range for I32 (-2147483648 to 2147483647)";
+      throw errorAt(at, "E0007", "integer literal " + text + range);
+    }
+    value = value * 10 - digit;
+    i++;
+  }
+  negative ? value : -value
+};
+
+// The value of each global by id when it is a `const`, or null when it is a `let`.
+let _constants: Array<?HirExpr> = [];
+// The number of loops around the code being checked, and whether a `break` leaves the innermost.
+let _loops = 0;
+let _broken = false;
+
+// Returns a copy at `at` of `value` if it is a literal or a negated one, or null.
+let _constantAt = fn(at: I32, value: ?HirExpr): ?HirExpr {
+  if (value == null) { return null; }
+
+  match (value) {
+    Int(_, number) => HirExpr.Int(at, number),
+    Bool(_, truth) => HirExpr.Bool(at, truth),
+    Bytes(_, text) => HirExpr.Bytes(at, text),
+    Unary(_, op, operand) => {
+      let inner = match (op) { Neg => _constantAt(at, operand), _ => null };
+      if (inner == null) { return null; }
+      HirExpr.Unary(at, HirOp.Neg, inner)
+    },
+    _ => null,
+  }
+};
+
+// Reads a binding; a global `const` holding a constant is read as the constant, as in jelloc.
+let _read = fn(at: I32, binding: Binding): HirExpr {
+  if (!binding.global) { return HirExpr.Local(at, binding.id, binding.ty); }
+  _constantAt(at, _constants[binding.id]) ?? HirExpr.Global(at, binding.id, binding.ty)
+};
+
+let _set = fn(at: I32, binding: Binding, value: HirExpr): HirExpr {
+  binding.global ? HirExpr.SetGlobal(at, binding.id, value)
+    : HirExpr.Assign(at, binding.id, value)
+};
+
+let _name = fn(at: I32, name: Bytes): Binding {
+  let found = lookup(name);
+  if (found == null) { throw errorAt(at, "E0300", "unknown name: " + name); }
+  found
+};
+
+// Returns the binding that an assignment or a step changes, which must be mutable.
+let _target = fn(target: Expr): Binding { match (target) {
+  Name(at, name) => {
+    let binding = _name(at, name);
+
+    if (!binding.mutable) {
+      let what = binding.global ? "global: " : "local: ";
+      throw errorAt(at, "E0303", "cannot assign to immutable " + what + name);
+    }
+    binding
+  },
+  _ => { throw _notYet(exprAt(target), "assignment target"); },
+} };
+
+let _require = fn(at: I32, actual: Type, wanted: Type, message: Bytes): Void {
+  if (!sameType(actual, wanted)) { throw errorAt(at, "E0500", message + typeName(actual)); }
+};
+
+let _binary = fn(at: I32, op: Bytes, left: HirExpr, right: HirExpr): HirExpr {
+  let a = typeOf(left);
+  let b = typeOf(right);
+  let undefined = "operator " + op + " is not defined for " + typeName(a) + " and " + typeName(b);
+  let bytes = sameType(a, Type.Bytes) && sameType(b, Type.Bytes);
+
+  if (bytes && (op == "+")) { return HirExpr.Binary(at, HirOp.BytesConcat, left, right); }
+
+  if (bytes && (op != "==") && (op != "!=")) {
+    throw errorAt(at, "E0500", "Bytes support only +, == and !=");
+  }
+  let numbers = sameType(a, Type.I32) && sameType(b, Type.I32);
+
+  if ((op == "+") || (op == "-") || (op == "*") || (op == "/") || (op == "%")) {
+    if (!numbers) { throw errorAt(at, "E0500", undefined); }
+    let kind = (op == "+") ? HirOp.Add : (op == "-") ? HirOp.Sub : (op == "*")
+      ? HirOp.Mul : (op == "/") ? HirOp.Div : HirOp.Rem;
+    return HirExpr.Binary(at, kind, left, right);
+  }
+
+  if ((op == "<") || (op == ">") || (op == "<=") || (op == ">=")) {
+    if (!numbers) { throw errorAt(at, "E0500", undefined); }
+    let kind = ((op == "<") || (op == ">=")) ? HirOp.Lt : HirOp.Gt;
+    let comparison = HirExpr.Binary(at, kind, left, right);
+    return ((op == "<=") || (op == ">=")) ? HirExpr.Unary(at, HirOp.Not, comparison) : comparison;
+  }
+
+  if ((op == "==") || (op == "!=")) {
+    // A bare Null has no value to compare. On the right, jelloc reads it as a Null<T> instead.
+    if (sameType(a, Type.Null)) {
+      throw errorAt(at, "E0500", "cannot compare " + typeName(a) + " with " + typeName(b));
+    }
+    if (sameType(b, Type.Null)) { throw _notYet(atOf(right), "null"); }
+    if (!sameType(a, b)) { throw errorAt(at, "E0500", undefined); }
+    let equal = HirExpr.Binary(at, bytes ? HirOp.BytesEq : HirOp.Eq, left, right);
+    return (op == "!=") ? HirExpr.Unary(at, HirOp.Not, equal) : equal;
+  }
+
+  if ((op == "&&") || (op == "||")) {
+    if (!sameType(a, Type.Bool) || !sameType(b, Type.Bool)) {
+      throw errorAt(at, "E0500", "&& and || require Bool operands");
+    }
+    return HirExpr.Binary(at, (op == "&&") ? HirOp.And : HirOp.Or, left, right);
+  }
+  throw _notYet(at, "operator " + op);
+};
+
+let _assignment = fn(at: I32, op: Bytes, target: Expr, value: Expr): HirExpr {
+  let binding = _target(target);
+  let checked = _expect(value, binding.ty);
+
+  if (!sameType(typeOf(checked), binding.ty)) {
+    let assigned = ", but the value assigned is " + typeName(typeOf(checked));
+    throw errorAt(exprAt(value), "E0400", binding.name + " is " + typeName(binding.ty) + assigned);
+  }
+  if (op == "=") { return _set(at, binding, checked); }
+  _set(at, binding, _binary(at, op.slice(0, 1), _read(at, binding), checked))
+};
+
+// `x++` becomes `x = x + 1`; as a postfix value it is then `(x = x + 1) - 1`, the old value.
+let _step = fn(at: I32, op: Bytes, prefix: Bool, target: Expr): HirExpr {
+  let binding = _target(target);
+
+  if (!sameType(binding.ty, Type.I32)) {
+    let message = "increment and decrement require an integer variable: ";
+    throw errorAt(at, "E0500", message + binding.name);
+  }
+  let one = HirExpr.Int(at, 1);
+  let step = (op == "++") ? HirOp.Add : HirOp.Sub;
+  let changed = _set(at, binding, HirExpr.Binary(at, step, _read(at, binding), one));
+  if (prefix) { return changed; }
+  HirExpr.Binary(at, (op == "++") ? HirOp.Sub : HirOp.Add, changed, one)
+};
+
+// Checks the statements of `block`, which the caller has given a scope.
+let _statements = fn(block: Block): Array<HirStmt> {
+  let statements: Array<HirStmt> = [];
+  let i = 0;
+
+  while (i < block.statements.len()) {
+    let stmt = block.statements[i];
+    if (ends(statements)) { throw errorAt(stmtAt(stmt), "E0701", "unreachable statement"); }
+    statements.push(_stmt(stmt));
+    i++;
+  }
+  statements
+};
+
+// Checks the condition of an `if`, a `?:` or a `while` (`what`), which must be a Bool.
+let _condition = fn(what: Bytes, condition: Expr): HirExpr {
+  let checked = _expr(condition);
+
+  if (!sameType(typeOf(checked), Type.Bool)) {
+    throw errorAt(exprAt(condition), "E0400", what + " condition must be Bool, not "
+      + typeName(typeOf(checked)));
+  }
+  checked
+};
+
+/* Checks a block whose value is used, in a scope of its own. When its statements end every path,
+ * its tail never runs, so the tail is checked and dropped, along with any `break` in it, and the
+ * block takes the type `expected` from its context, or Null. */
+let _block = fn(block: Block, expected: ?Type): HirExpr {
+  enter();
+  let statements = _statements(block);
+  let broken = _broken;
+  let tail = block.tail == null ? null : _expect(block.tail, expected);
+  leave();
+
+  if (ends(statements)) {
+    _broken = broken;
+    return HirExpr.Block(block.at, statements, null, expected ?? Type.Null);
+  }
+
+  if (tail == null) {
+    throw errorAt(block.at, "E0410", "value block requires a trailing expression");
+  }
+  HirExpr.Block(block.at, statements, tail, typeOf(tail))
+};
+
+/* Checks a block whose value is thrown away, in a scope of its own. A tail after statements that
+ * end every path never runs, so it is checked and dropped, along with any `break` in it. */
+let _effects = fn(block: Block): Array<HirStmt> {
+  enter();
+  let statements = _statements(block);
+
+  if (block.tail != null) {
+    let broken = _broken;
+    let tail = _discarded(block.tail);
+    if (ends(statements)) { _broken = broken; } else { statements.push(tail); }
+  }
+  leave();
+  statements
+};
+
+// Whether `value` is a block that gives no value, because every path through it ends first.
+let _noValue = fn(value: HirExpr): Bool { match (value) {
+  Block(_, _, tail, _) => tail == null,
+  _ => false,
+} };
+
+// Gives `value`, if it is a block that gives no value, the type `ty` of the branches it joins.
+let _retype = fn(value: HirExpr, ty: Type): HirExpr { match (value) {
+  Block(at, statements, tail, _) => tail == null ? HirExpr.Block(at, statements, null, ty) : value,
+  _ => value,
+} };
+
+/* Joins the branches of an `if` or a `?:` at `at`. A block that gives no value takes the other
+ * branch's type, and both take `expected`, or Null, when neither gives one. Otherwise the two must
+ * have the same type, or the error is at `otherwiseAt`. A Null branch joins to a Null<T>, which
+ * jelloc allows and JellyBaby does not support yet. */
+let _join = fn(
+  at: I32,
+  condition: HirExpr,
+  yes: HirExpr,
+  no: HirExpr,
+  otherwiseAt: I32,
+  expected: ?Type
+): HirExpr {
+  let yesEnds = _noValue(yes);
+  let noEnds = _noValue(no);
+  let ty = !yesEnds ? typeOf(yes) : !noEnds ? typeOf(no) : expected ?? Type.Null;
+
+  if (!yesEnds && !noEnds && !sameType(typeOf(yes), typeOf(no))) {
+    let nulls = sameType(typeOf(yes), Type.Null) || sameType(typeOf(no), Type.Null);
+    if (nulls) { throw _notYet(at, "null"); }
+    throw errorAt(otherwiseAt, "E0400", "if branches must have the same type, not "
+      + typeName(typeOf(yes)) + " and " + typeName(typeOf(no)));
+  }
+  HirExpr.If(at, condition, _retype(yes, ty), _retype(no, ty), ty)
+};
+
+let _branchValueAt = fn(expr: Expr): I32 { match (expr) {
+  BlockExpr(at, block) => block.tail == null ? at : exprAt(block.tail),
+  _ => exprAt(expr),
+} };
+
+// Checks `expr` where its context needs a value of type `expected`, which only a block uses.
+let _expect = fn(expr: Expr, expected: ?Type): HirExpr { match (expr) {
+  BlockExpr(_, block) => _block(block, expected),
+  If(at, condition, then, otherwise) => {
+    if (otherwise == null) {
+      throw errorAt(at, "E0410", "an if used as a value needs an else branch");
+    }
+    let checkedCondition = _condition("if", condition);
+    let yes = _block(then, expected);
+    let no = _expect(otherwise, expected);
+    _join(at, checkedCondition, yes, no, _branchValueAt(otherwise), expected)
+  },
+  Conditional(at, condition, then, otherwise) => {
+    let checkedCondition = _condition("if", condition);
+    let yes = _expect(then, expected);
+    let no = _expect(otherwise, expected);
+    _join(at, checkedCondition, yes, no, exprAt(otherwise), expected)
+  },
+  _ => _expr(expr),
+} };
+
+let _ifStatement = fn(at: I32, condition: Expr, then: Block, otherwise: ?Expr): HirStmt {
+  let checkedCondition = _condition("if", condition);
+  let yes = _effects(then);
+  let no: ?Array<HirStmt> = null;
+
+  if (otherwise != null) {
+    no = match (otherwise) { BlockExpr(_, block) => _effects(block), _ => [_discarded(otherwise)] };
+  }
+  HirStmt.If(at, checkedCondition, yes, no)
+};
+
+// A value thrown away: a block becomes a block statement and a step needs no old value.
+let _discarded = fn(value: Expr): HirStmt { match (value) {
+  BlockExpr(_, block) => HirStmt.Block(_effects(block)),
+  Step(at, op, _, target) => HirStmt.Expression(_step(at, op, true, target)),
+  If(at, condition, then, otherwise) => _ifStatement(at, condition, then, otherwise),
+  _ => HirStmt.Expression(_expr(value)),
+} };
+
+let _expr = fn(expr: Expr): HirExpr { match (expr) {
+  Int(at, digits) => HirExpr.Int(at, _literal(at, digits, false)),
+  Bytes(at, value) => HirExpr.Bytes(at, value),
+  Bool(at, value) => HirExpr.Bool(at, value),
+  Name(at, name) => _read(at, _name(at, name)),
+  Unary(at, op, operand) => {
+    if (op == "-") {
+      match (operand) {
+        Int(_, digits) => { return HirExpr.Int(at, _literal(at, digits, true)); },
+        _ => null,
+      };
+      let checked = _expr(operand);
+      _require(at, typeOf(checked), Type.I32, "negation requires a number operand, not ");
+      return HirExpr.Unary(at, HirOp.Neg, checked);
+    }
+    if (op != "!") { throw _notYet(at, "unary operator"); }
+    let checked = _expr(operand);
+    _require(at, typeOf(checked), Type.Bool, "operator ! requires a Bool operand, not ");
+    HirExpr.Unary(at, HirOp.Not, checked)
+  },
+  Binary(at, op, left, right) => {
+    let logical = (op == "&&") || (op == "||") ? Type.Bool : null;
+    _binary(at, op, _expect(left, logical), _expect(right, logical))
+  },
+  Assign(at, op, target, value) => _assignment(at, op, target, value),
+  Step(at, op, prefix, target) => _step(at, op, prefix, target),
+  BlockExpr(_, _), If(_, _, _, _), Conditional(_, _, _, _) => _expect(expr, null),
+  Null(at) => { throw _notYet(at, "null"); },
+  Function(at, _, _, _) => { throw _notYet(at, "function"); },
+  Coalesce(at, _, _) => { throw _notYet(at, "conditional"); },
+  Cast(at, _, _) => { throw _notYet(at, "cast"); },
+  Call(at, _, _) => { throw _notYet(at, "call"); },
+  Member(at, _, _), Index(at, _, _) => { throw _notYet(at, "member access"); },
+  Match(at, _, _) => { throw _notYet(at, "match"); },
+  Try(at, _, _, _) => { throw _notYet(at, "try"); },
+  ArrayLit(at, _) => { throw _notYet(at, "array literal"); },
+  RecordLit(at, _) => { throw _notYet(at, "record literal"); },
+} };
+
+let _let = fn(
+  at: I32,
+  isConst: Bool,
+  nameAt: I32,
+  name: Bytes,
+  annotation: ?Type,
+  value: Expr
+): HirStmt {
+  let checked = _expect(value, annotation);
+  let ty = annotation ?? typeOf(checked);
+
+  if ((annotation == null) && sameType(ty, Type.Null)) {
+    let hint = "; annotate it as Null<T>";
+    throw errorAt(nameAt, "E0403", "cannot infer the type of " + name + hint);
+  }
+
+  if (!sameType(ty, typeOf(checked))) {
+    let actual = ", but its value is " + typeName(typeOf(checked));
+    throw errorAt(exprAt(value), "E0400", name + " is annotated " + typeName(ty) + actual);
+  }
+  let binding = declare(name, ty, !isConst, at);
+
+  if (binding.global) {
+    _constants.push(isConst ? checked : null);
+    return HirStmt.Global(at, binding.id, name, checked);
+  }
+  HirStmt.Let(at, binding.id, name, isConst, checked)
+};
+
+let _stmt = fn(stmt: Stmt): HirStmt { match (stmt) {
+  Let(at, isConst, _, nameAt, name, annotation, value) => {
+    // A duplicate local is reported before the annotation and value; a duplicate global after.
+    if (!topLevel()) { fresh(name, at); }
+    _let(at, isConst, nameAt, name, annotation == null ? null : resolve(annotation), value)
+  },
+  Expression(_, value) => _discarded(value),
+  While(at, condition, body) => {
+    let checkedCondition = _condition("while", condition);
+    let outer = _broken;
+    _broken = false;
+    _loops++;
+    let checkedBody = _effects(body);
+    _loops--;
+    let breaks = _broken;
+    _broken = outer;
+    HirStmt.While(at, checkedCondition, checkedBody, breaks)
+  },
+  Break(at) => {
+    if (_loops == 0) { throw errorAt(at, "E0307", "break outside loop"); }
+    _broken = true;
+    HirStmt.Break(at)
+  },
+  Continue(at) => {
+    if (_loops == 0) { throw errorAt(at, "E0307", "continue outside loop"); }
+    HirStmt.Continue(at)
+  },
+  Return(at, _) => { throw _notYet(at, "return"); },
+  Throw(at, _) => { throw _notYet(at, "throw"); },
+  Record(at, _, _, _) => { throw _notYet(at, "typedef"); },
+  Enum(at, _, _, _) => { throw _notYet(at, "enum"); },
+  Import(at, _, _, _) => { throw _notYet(at, "import"); },
+  Load(at, _, _) => { throw _notYet(at, "load"); },
+} };
+
+// Checks a whole program, whose value is its tail, or null if it has none.
+export let check = fn(program: Program): HirProgram {
+  reset();
+  _constants = [];
+  _loops = 0;
+  _broken = false;
+  let statements = _statements(program.block);
+  let tail = program.block.tail == null ? HirExpr.Null(0) : _expr(program.block.tail);
+  { statements: statements, tail: tail }
+};

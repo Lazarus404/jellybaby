@@ -1,0 +1,8 @@
+let x = 0;
+
+while (x < 4) {
+  x++;
+  if (x == 2) { continue; }
+  if (x == 3) { break; }
+}
+x

@@ -131,5 +131,15 @@ if (chapterNumber >= 7) {
   }
 }
 
+if (chapterNumber >= 8) {
+  for (golden in filesUnder("tests/golden", ".ir")) {
+    if (chapterOf(golden) != chapterNumber) { continue; }
+    let name = rest(golden, golden.lastIndexOf("/") + 1);
+    let file = "tests/run/" + name.slice(0, name.len() - 3) + ".jello";
+    let (status, out, err) = ours(file, "--ir");
+    report((status == 0) && (out == readText(golden)), "ir", file, line(err));
+  }
+}
+
 say("corpus: " + Std.string(passed) + " passed, " + Std.string(failed) + " failed");
 System.exit(failed == 0 ? 0 : 1);

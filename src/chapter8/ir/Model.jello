@@ -1,0 +1,33 @@
+package ir;
+
+/** @file The register and basic-block IR between checking and bytecode emission. */
+
+import type { Type } from frontend.semantics.Types;
+
+export enum IrOp { Add; Sub; Mul; Div; Rem; Neg; Not; Eq; Lt; }
+
+export enum Insn {
+  Const(at: I32, dst: I32, ty: Type, value: I32);
+  Move(at: I32, dst: I32, src: I32);
+  Unary(at: I32, op: IrOp, dst: I32, src: I32);
+  Binary(at: I32, op: IrOp, dst: I32, left: I32, right: I32);
+}
+
+export enum End {
+  Jump(at: I32, target: I32);
+  Branch(at: I32, condition: I32, then: I32, otherwise: I32);
+  Return(at: I32, value: I32);
+}
+
+export typedef Block = {
+  let insns: Array<Insn>;
+  // Null only until Lower closes the block; every placed block is closed.
+  let end: ?End;
+};
+
+export typedef Function = {
+  let regs: Array<Type>;
+  let blocks: Array<Block>;
+  let order: Array<I32>;
+  let result: Type;
+};
