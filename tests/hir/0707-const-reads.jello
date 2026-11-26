@@ -1,0 +1,14 @@
+const n = 3;
+const minus = - -n;
+const copy = n;
+const sum = 1 + 2;
+const yes = true;
+const text = "a";
+let m = 4;
+const local = {
+  const k = 5;
+  k
+};
+text == text;
+!yes;
+n + minus + copy + sum + m + local

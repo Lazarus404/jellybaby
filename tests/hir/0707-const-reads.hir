@@ -1,0 +1,44 @@
+program
+  global g0 n: i32
+    i32 3: i32
+  global g1 minus: i32
+    neg.wrap: i32
+      neg.wrap: i32
+        i32 3: i32
+  global g2 copy: i32
+    i32 3: i32
+  global g3 sum: i32
+    add.wrap: i32
+      i32 1: i32
+      i32 2: i32
+  global g4 yes: bool
+    bool true: bool
+  global g5 text: bytes
+    bytes "a": bytes
+  global g6 m: i32
+    i32 4: i32
+  global g7 local: i32
+    block: i32
+      const %0 k: i32
+        i32 5: i32
+      local %0: i32
+  expression
+    bytes.eq: bool
+      bytes "a": bytes
+      bytes "a": bytes
+  expression
+    not.bool: bool
+      bool true: bool
+  add.wrap: i32
+    add.wrap: i32
+      add.wrap: i32
+        add.wrap: i32
+          add.wrap: i32
+            i32 3: i32
+            neg.wrap: i32
+              neg.wrap: i32
+                i32 3: i32
+          i32 3: i32
+        global g3: i32
+      global g6: i32
+    global g7: i32

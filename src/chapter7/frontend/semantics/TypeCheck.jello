@@ -45,9 +45,30 @@ let _literal = fn(at: I32, digits: Bytes, negative: Bool): I32 {
   negative ? value : -value
 };
 
+// The value of each global by id when it is a `const`, or null when it is a `let`.
+let _constants: Array<?HirExpr> = [];
+
+// Returns a copy at `at` of `value` if it is a literal or a negated one, or null.
+let _constantAt = fn(at: I32, value: ?HirExpr): ?HirExpr {
+  if (value == null) { return null; }
+
+  match (value) {
+    Int(_, number) => HirExpr.Int(at, number),
+    Bool(_, truth) => HirExpr.Bool(at, truth),
+    Bytes(_, text) => HirExpr.Bytes(at, text),
+    Unary(_, op, operand) => {
+      let inner = match (op) { Neg => _constantAt(at, operand), _ => null };
+      if (inner == null) { return null; }
+      HirExpr.Unary(at, HirOp.Neg, inner)
+    },
+    _ => null,
+  }
+};
+
+// Reads a binding; a global `const` holding a constant is read as the constant, as in jelloc.
 let _read = fn(at: I32, binding: Binding): HirExpr {
-  binding.global ? HirExpr.Global(at, binding.id, binding.ty)
-    : HirExpr.Local(at, binding.id, binding.ty)
+  if (!binding.global) { return HirExpr.Local(at, binding.id, binding.ty); }
+  _constantAt(at, _constants[binding.id]) ?? HirExpr.Global(at, binding.id, binding.ty)
 };
 
 let _set = fn(at: I32, binding: Binding, value: HirExpr): HirExpr {
@@ -228,7 +249,11 @@ let _let = fn(at: I32, isConst: Bool, name: Bytes, annotation: ?Type, value: Exp
     throw errorAt(_at(value), "E0400", name + " is annotated " + typeName(ty) + actual);
   }
   let binding = declare(name, ty, !isConst, at);
-  if (binding.global) { return HirStmt.Global(at, binding.id, name, checked); }
+
+  if (binding.global) {
+    _constants.push(isConst ? checked : null);
+    return HirStmt.Global(at, binding.id, name, checked);
+  }
   HirStmt.Let(at, binding.id, name, isConst, checked)
 };
 
@@ -253,6 +278,7 @@ let _stmt = fn(stmt: Stmt): HirStmt { match (stmt) {
 // Checks a whole program, whose value is its tail, or null if it has none.
 export let check = fn(program: Program): HirProgram {
   reset();
+  _constants = [];
   let statements = _statements(program.block);
   let tail = program.block.tail == null ? HirExpr.Null(0) : _expr(program.block.tail);
   { statements: statements, tail: tail }

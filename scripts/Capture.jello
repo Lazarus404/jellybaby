@@ -2,14 +2,17 @@ import { run } from std.io.Command;
 import { exists, makeDirs, readText, writeText } from std.io.File;
 import { indexOf } from std.core.Bytes;
 
+/* Records what jelloc makes of each test file: with --hir its typed tree in NAME.hir, otherwise
+ * what the program prints in NAME.out. An existing file is only compared, unless --write is given.
+ * Files are written as bytes, so they match on every platform, whatever a shell redirect does. */
+
 let args = System.args;
 let write = List.contains(args, "--write");
+let hir = List.contains(args, "--hir");
 makeDirs("build/capture");
 
-for (file in args) {
-  if (file == "--write") { continue; }
-  let slash = file.lastIndexOf("/");
-  let name = file.slice(slash + 1, file.len() - slash - 7);
+// Returns what the program in `file` prints, or `trap KIND` if it traps.
+let printed = fn(file: Bytes, name: Bytes): Bytes {
   let module = "build/capture/" + name + ".jlo";
   let (compiled, _, compileErr) = run(["jelloc", file, "--out", module], []);
   if (compiled != 0) { throw compileErr; }
@@ -19,11 +22,25 @@ for (file in args) {
   if ((status != 0) && (trap >= 0)) {
     let start = trap + 10;
     let end = err.slice(start, err.len() - start).indexOf("\n");
-    out = "trap " + (end < 0 ? err.slice(start, err.len() - start) : err.slice(start, end)) + "\n";
-  } else if (status != 0) {
-    throw err;
+    return "trap " + (end < 0 ? err.slice(start, err.len() - start) : err.slice(start, end)) + "\n";
   }
-  let path = file.slice(0, file.len() - 6) + ".out";
+  if (status != 0) { throw err; }
+  out
+};
+
+// Returns jelloc's typed tree for `file`.
+let typed = fn(file: Bytes): Bytes {
+  let (status, out, err) = run(["jelloc", file, "--hir"], []);
+  if (status != 0) { throw err; }
+  out
+};
+
+for (file in args) {
+  if ((file == "--write") || (file == "--hir")) { continue; }
+  let slash = file.lastIndexOf("/");
+  let name = file.slice(slash + 1, file.len() - slash - 7);
+  let out = hir ? typed(file) : printed(file, name);
+  let path = file.slice(0, file.len() - 6) + (hir ? ".hir" : ".out");
 
   if (!exists(path) || write) {
     writeText(path, out);

@@ -5,7 +5,6 @@ package backend.jello;
 import type { HirExpr, HirProgram, HirStmt } from frontend.hir.Hir;
 import { typeOf } from frontend.hir.Hir;
 import type { Type } from frontend.semantics.Types;
-import { Type } from frontend.semantics.Types;
 import { errorAt } from frontend.syntax.Source;
 import { indexOf, intText, join } from support.Text;
 
